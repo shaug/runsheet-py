@@ -21,8 +21,8 @@ from runsheet._internal import (
     to_ctx_dict,
     to_error,
 )
-from runsheet._result import RollbackCallback, StepFailure, StepResult
-from runsheet._step import Step, _FnStep
+from runsheet._result import RollbackCallback, Runnable, StepFailure, StepResult
+from runsheet._step import _FnStep
 
 
 def _cross_product(
@@ -64,7 +64,7 @@ def _cross_product(
 def distribute(
     key: str,
     mapping: dict[str, str],
-    inner_step: Step,
+    inner_step: Runnable,
 ) -> _FnStep:
     """Distribute collections across a step via cross-product, concurrently.
 
@@ -108,10 +108,8 @@ def distribute(
         }
 
         if not combinations:
-            data: dict[str, Any] = {key: []}
             _last_execution.clear()
-            _last_execution.append((combinations, base_ctx, []))
-            return step_success(data, meta)
+            return step_success({key: []}, meta)
 
         # Run step for each combination concurrently
         async def run_one(
@@ -146,7 +144,10 @@ def distribute(
                 succeeded.append((i, output))
 
         if errors:
-            # Roll back succeeded items in reverse order (best-effort)
+            # Partial failure: roll back succeeded items (best-effort).
+            # Errors are swallowed here because the primary error is the
+            # step failure itself; the external rollback path (make_rb)
+            # reports errors via RollbackError.
             if inner_step.has_rollback:
                 for idx, output in reversed(succeeded):
                     combo = combinations[idx]

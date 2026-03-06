@@ -58,12 +58,21 @@ def collapse_errors(errors: list[Exception], message: str) -> Exception:
 
 
 def to_ctx_dict(ctx: object) -> dict[str, Any]:
-    """Normalize ctx to dict[str, Any]."""
+    """Normalize ctx to dict[str, Any].
+
+    Raises TypeError for unrecognized types to fail fast rather than
+    silently producing an empty context.
+    """
     if isinstance(ctx, dict):
         return cast(dict[str, Any], ctx)
     if isinstance(ctx, BaseModel):
         return ctx.model_dump()
-    return {}
+    if isinstance(ctx, Mapping):
+        return dict(cast(Mapping[str, Any], ctx))
+    raise TypeError(
+        f"Cannot convert {type(ctx).__name__} to context dict. "
+        "Pass a dict, BaseModel, or Mapping instance."
+    )
 
 
 def partition_settled(

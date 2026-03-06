@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from runsheet._errors import RollbackError
 from runsheet._internal import (
     collapse_errors,
     partition_settled,
@@ -24,8 +25,14 @@ from runsheet._internal import (
     to_ctx_dict,
     to_error,
 )
-from runsheet._result import StepFailure, StepMeta, StepResult
-from runsheet._step import Step, _FnStep
+from runsheet._result import (
+    RollbackCallback,
+    Runnable,
+    StepFailure,
+    StepMeta,
+    StepResult,
+)
+from runsheet._step import _FnStep
 
 # ---------------------------------------------------------------------------
 # map_step
@@ -35,10 +42,19 @@ from runsheet._step import Step, _FnStep
 def map_step(
     key: str,
     collection_fn: Callable[[dict[str, Any]], Any],
-    mapper: Callable[[Any, dict[str, Any]], Any] | Step,
+    mapper: Callable[[Any, dict[str, Any]], Any] | Runnable,
 ) -> _FnStep:
     """Map over a collection. Function form or step form."""
     step_name = f"map({key})"
+
+    # Per-call-site state for external rollback (step form only).
+    # Captured by make_rb immediately after run — safe because Pipeline
+    # calls run() then make_rollback() with no await in between.
+    _last_execution: list[
+        tuple[Runnable, list[tuple[dict[str, Any], dict[str, Any]]]]
+    ] = []
+
+    is_step = isinstance(mapper, Runnable)
 
     async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
         ctx_dict = to_ctx_dict(ctx)
@@ -52,11 +68,45 @@ def map_step(
         except Exception as e:
             return step_failure(to_error(e), meta, step_name)
 
-        if isinstance(mapper, Step):
-            return await _map_step_form(key, mapper, ctx_dict, items_list, meta)
+        if isinstance(mapper, Runnable):
+            return await _map_step_form(
+                key, step_name, mapper, ctx_dict, items_list, meta, _last_execution
+            )
+        _last_execution.clear()
+        assert callable(mapper)
         return await _map_fn_form(key, mapper, ctx_dict, items_list, meta)
 
-    return _FnStep(name=step_name, run_fn=run_fn)
+    def make_rb(
+        pre_ctx: dict[str, Any], output: dict[str, Any]
+    ) -> RollbackCallback | None:
+        if not _last_execution:
+            return None
+        inner_step, item_pairs = _last_execution[0]
+        _last_execution.clear()
+
+        if not inner_step.has_rollback or not item_pairs:
+            return None
+
+        async def cb() -> None:
+            errors: list[Exception] = []
+            for item_ctx, item_output in reversed(item_pairs):
+                try:
+                    await inner_step.run_rollback(item_ctx, item_output)
+                except Exception as e:
+                    errors.append(to_error(e))
+            if errors:
+                raise RollbackError(
+                    f"{step_name}: {len(errors)} rollback(s) failed",
+                    causes=tuple(errors),
+                )
+
+        return cb
+
+    return _FnStep(
+        name=step_name,
+        run_fn=run_fn,
+        make_rollback_fn=make_rb if is_step else None,
+    )
 
 
 async def _map_fn_form(
@@ -90,16 +140,16 @@ async def _map_fn_form(
 
 async def _map_step_form(
     key: str,
-    inner_step: Step,
+    step_name: str,
+    inner_step: Runnable,
     ctx: dict[str, Any],
     items: list[object],
     meta: StepMeta,
+    last_execution: list[tuple[Runnable, list[tuple[dict[str, Any], dict[str, Any]]]]],
 ) -> StepResult[dict[str, Any]]:
-    pre_ctx: dict[str, Any] = dict(ctx)
-
     async def run_one(
         item: object,
-    ) -> tuple[dict[str, Any] | None, Exception | None]:
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, Exception | None]:
         item_ctx: dict[str, Any]
         if isinstance(item, dict):
             item_ctx = {**ctx, **item}
@@ -110,8 +160,8 @@ async def _map_step_form(
 
         result = await inner_step.run(item_ctx)
         if isinstance(result, StepFailure):
-            return None, result.error
-        return result.data, None
+            return item_ctx, None, result.error
+        return item_ctx, result.data, None
 
     raw = await asyncio.gather(
         *(run_one(item) for item in items),
@@ -120,27 +170,39 @@ async def _map_step_form(
     settled, gather_errors = partition_settled(raw)
 
     errors: list[Exception] = list(gather_errors)
-    succeeded: list[dict[str, Any]] = []
-    for item in cast(list[tuple[dict[str, Any] | None, Exception | None]], settled):
-        output, err = item
+    succeeded: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for item in cast(
+        list[tuple[dict[str, Any], dict[str, Any] | None, Exception | None]],
+        settled,
+    ):
+        item_ctx, output, err = item
         if err is not None:
             errors.append(err)
         else:
             assert output is not None
-            succeeded.append(output)
+            succeeded.append((item_ctx, output))
 
     if errors:
-        for output in reversed(succeeded):
-            if inner_step.has_rollback:
+        # Partial failure: roll back succeeded items (best-effort).
+        # Errors are swallowed here because the primary error is the step
+        # failure itself; the pipeline's RollbackReport covers the external
+        # rollback path.
+        if inner_step.has_rollback:
+            for item_ctx, output in reversed(succeeded):
                 with contextlib.suppress(Exception):
-                    await inner_step.run_rollback(pre_ctx, output)
+                    await inner_step.run_rollback(item_ctx, output)
         return step_failure(
             collapse_errors(errors, f"map({key}): {len(errors)} item(s) failed"),
             meta,
             f"map({key})",
         )
 
-    return step_success({key: succeeded}, meta)
+    # Store for make_rollback to capture
+    last_execution.clear()
+    last_execution.append((inner_step, succeeded))
+
+    results = [output for _, output in succeeded]
+    return step_success({key: results}, meta)
 
 
 # ---------------------------------------------------------------------------

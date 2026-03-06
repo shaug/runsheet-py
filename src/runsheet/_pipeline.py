@@ -109,10 +109,8 @@ class Pipeline:
         steps_executed: list[str] = []
         executed: list[ExecutedStep] = []
 
-        # Normalize input to dict
-        ctx_dict = to_ctx_dict(ctx) if ctx is not None else {}
-        if isinstance(ctx, (dict, BaseModel)):
-            ctx_dict = dict(ctx_dict)  # ensure a fresh copy
+        # Normalize input to a fresh dict copy
+        ctx_dict = dict(to_ctx_dict(ctx)) if ctx is not None else {}
 
         args_snapshot: dict[str, Any] = dict(ctx_dict)
 

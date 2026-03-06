@@ -320,3 +320,20 @@ class TestCoverage:
 
         result = to_ctx_dict(MyModel())
         assert result == {"x": 1, "y": "hello"}
+
+    def test_to_ctx_dict_with_mapping(self) -> None:
+        """to_ctx_dict handles Mapping instances."""
+        from types import MappingProxyType
+
+        proxy = MappingProxyType({"a": 1, "b": 2})
+        result = to_ctx_dict(proxy)
+        assert result == {"a": 1, "b": 2}
+        assert isinstance(result, dict)
+
+    def test_to_ctx_dict_rejects_unknown_types(self) -> None:
+        """to_ctx_dict raises TypeError for unrecognized types."""
+        with pytest.raises(TypeError, match="Cannot convert"):
+            to_ctx_dict("not a dict")  # type: ignore[arg-type]
+
+        with pytest.raises(TypeError, match="Cannot convert"):
+            to_ctx_dict(42)  # type: ignore[arg-type]

@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from runsheet import (
@@ -180,3 +181,20 @@ class TestChoice:
         result = await pipeline.run({})
         assert isinstance(result, AggregateFailure)
         assert isinstance(result.error, PredicateError)
+
+    def test_bare_step_not_last_raises(self) -> None:
+        """Bare step (default) must be the last argument."""
+
+        @step(provides=CardOutput)
+        async def charge_card(ctx: dict) -> CardOutput:  # type: ignore[type-arg]
+            return CardOutput(charge_id="card_1", method="card")
+
+        @step(provides=BankOutput)
+        async def charge_bank(ctx: dict) -> BankOutput:  # type: ignore[type-arg]
+            return BankOutput(charge_id="bank_1", method="bank")
+
+        with pytest.raises(ValueError, match="last argument"):
+            choice(
+                charge_card,  # bare step not last — should error
+                (lambda ctx: ctx.get("method") == "bank", charge_bank),
+            )

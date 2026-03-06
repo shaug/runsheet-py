@@ -263,7 +263,7 @@ class _FnStep:  # pyright: ignore[reportUnusedClass]
         return await self._run_fn(ctx)  # type: ignore[no-any-return]
 
     async def run_rollback(self, ctx: object, output: object) -> None:
-        pass
+        """No-op — _FnStep rollback is handled via make_rollback() callbacks."""
 
     def make_rollback(
         self, pre_ctx: dict[str, Any], output: dict[str, Any]

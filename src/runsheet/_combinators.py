@@ -25,8 +25,8 @@ from runsheet._internal import (
     to_ctx_dict,
     to_error,
 )
-from runsheet._result import RollbackCallback, StepFailure, StepResult
-from runsheet._step import Step, _FnStep
+from runsheet._result import RollbackCallback, Runnable, StepFailure, StepResult
+from runsheet._step import _FnStep
 
 # ---------------------------------------------------------------------------
 # when() — conditional step wrapper
@@ -35,7 +35,7 @@ from runsheet._step import Step, _FnStep
 
 def when(
     predicate: Callable[[dict[str, Any]], object],
-    inner_step: Step,
+    inner_step: Runnable,
 ) -> _FnStep:
     """Conditional step — only runs when predicate returns True."""
     step_name = f"when({inner_step.name})"
@@ -63,7 +63,7 @@ def when(
             return step_success({}, meta)
 
         _ran[0] = True
-        return await inner_step.run(ctx)
+        return await inner_step.run(ctx_dict)
 
     def make_rb(
         pre_ctx: dict[str, Any], output: dict[str, Any]
@@ -88,7 +88,7 @@ def when(
 # ---------------------------------------------------------------------------
 
 
-def parallel(*steps: Step) -> _FnStep:
+def parallel(*steps: Runnable) -> _FnStep:
     """Run inner steps concurrently, merge outputs in list order.
 
     Returns a StepResult with AggregateMeta tracking steps_executed.
@@ -103,15 +103,15 @@ def parallel(*steps: Step) -> _FnStep:
     # Per-call-site state captured by make_rollback immediately after run.
     # Safe because Pipeline calls run() then make_rollback() with no await
     # in between (asyncio cooperative scheduling guarantees no interleaving).
-    _last_succeeded: list[tuple[Step, dict[str, Any]]] = []
+    _last_succeeded: list[tuple[Runnable, dict[str, Any]]] = []
 
     async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
         ctx_dict = to_ctx_dict(ctx)
         pre_ctx: dict[str, Any] = dict(ctx_dict)
 
         async def run_one(
-            s: Step,
-        ) -> tuple[Step, dict[str, Any] | None, Exception | None]:
+            s: Runnable,
+        ) -> tuple[Runnable, dict[str, Any] | None, Exception | None]:
             result = await s.run(ctx_dict)
             if isinstance(result, StepFailure):
                 return (s, None, result.error)
@@ -124,11 +124,11 @@ def parallel(*steps: Step) -> _FnStep:
         settled, gather_errors = partition_settled(raw)
 
         errors: list[Exception] = list(gather_errors)
-        succeeded: list[tuple[Step, dict[str, Any]]] = []
+        succeeded: list[tuple[Runnable, dict[str, Any]]] = []
         executed: list[str] = []
 
         for item in cast(
-            list[tuple[Step, dict[str, Any] | None, Exception | None]],
+            list[tuple[Runnable, dict[str, Any] | None, Exception | None]],
             settled,
         ):
             s, output, err = item
@@ -140,10 +140,11 @@ def parallel(*steps: Step) -> _FnStep:
                 executed.append(s.name)
 
         if errors:
-            for s, output in reversed(succeeded):
-                if s.has_rollback:
+            for s, out in reversed(succeeded):
+                rb = s.make_rollback(pre_ctx, out)
+                if rb is not None:
                     with contextlib.suppress(Exception):
-                        await s.run_rollback(pre_ctx, output)
+                        await rb()
             error = collapse_errors(
                 errors, f"{step_name}: {len(errors)} step(s) failed"
             )
@@ -166,15 +167,20 @@ def parallel(*steps: Step) -> _FnStep:
     ) -> RollbackCallback | None:
         captured = list(_last_succeeded)
         _last_succeeded.clear()
-        rollbackable = [(s, out) for s, out in captured if s.has_rollback]
-        if not rollbackable:
+        # Capture rollback callbacks for each succeeded step
+        callbacks: list[RollbackCallback] = []
+        for s, out in captured:
+            rb = s.make_rollback(pre_ctx, out)
+            if rb is not None:
+                callbacks.append(rb)
+        if not callbacks:
             return None
 
         async def cb() -> None:
             errors: list[Exception] = []
-            for s, out in reversed(rollbackable):
+            for rb_cb in reversed(callbacks):
                 try:
-                    await s.run_rollback(pre_ctx, out)
+                    await rb_cb()
                 except Exception as e:
                     errors.append(to_error(e))
             if errors:
@@ -194,7 +200,7 @@ def parallel(*steps: Step) -> _FnStep:
 
 
 def choice(
-    *branches: tuple[Callable[[dict[str, Any]], object], Step] | Step,
+    *branches: tuple[Callable[[dict[str, Any]], object], Runnable] | Runnable,
 ) -> _FnStep:
     """Branching: predicates evaluated in order, first match wins.
 
@@ -204,16 +210,21 @@ def choice(
     """
     step_name = "choice"
 
-    # Normalize bare Step to (always-true predicate, step) tuples
-    normalized: list[tuple[Callable[[dict[str, Any]], object], Step]] = []
-    for b in branches:
+    # Normalize bare steps to (always-true predicate, step) tuples.
+    # A bare step (default branch) is only valid as the last argument.
+    normalized: list[tuple[Callable[[dict[str, Any]], object], Runnable]] = []
+    for i, b in enumerate(branches):
         if isinstance(b, tuple):
             normalized.append(b)
-        else:
+        elif i == len(branches) - 1:
             normalized.append((lambda _: True, b))
+        else:
+            raise ValueError(
+                f"Bare step '{b.name}' must be the last argument (default branch)"
+            )
 
     # Per-call-site state captured by make_rollback immediately after run.
-    _last_matched: list[Step | None] = [None]
+    _last_matched: list[tuple[Runnable, dict[str, Any]] | None] = [None]
 
     async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
         ctx_dict = to_ctx_dict(ctx)
@@ -232,11 +243,11 @@ def choice(
                 return step_failure(error, meta, step_name)
 
             if should_run:
-                result = await inner_step.run(ctx)
+                result = await inner_step.run(ctx_dict)
                 if isinstance(result, StepFailure):
                     meta = aggregate_meta(step_name, ctx_dict, (inner_step.name,))
                     return step_failure(result.error, meta, step_name)
-                _last_matched[0] = inner_step
+                _last_matched[0] = (inner_step, result.data)
                 meta = aggregate_meta(step_name, ctx_dict, (inner_step.name,))
                 return step_success(result.data, meta)
 
@@ -250,20 +261,11 @@ def choice(
     def make_rb(
         pre_ctx: dict[str, Any], output: dict[str, Any]
     ) -> RollbackCallback | None:
-        ms = _last_matched[0]
+        matched = _last_matched[0]
         _last_matched[0] = None
-        if ms is None or not ms.has_rollback:
+        if matched is None:
             return None
-
-        async def cb() -> None:
-            try:
-                await ms.run_rollback(pre_ctx, output)
-            except Exception as e:
-                raise RollbackError(
-                    f"{step_name}: 1 rollback(s) failed",
-                    causes=(to_error(e),),
-                ) from e
-
-        return cb
+        ms, ms_output = matched
+        return ms.make_rollback(pre_ctx, ms_output)
 
     return _FnStep(name=step_name, run_fn=run_fn, make_rollback_fn=make_rb)
