@@ -78,23 +78,29 @@ pipeline = Pipeline(
 result = await pipeline.run(OrderInput(order_id="123"))
 ```
 
-pipeline.run() NEVER raises. Always returns PipelineResult.
+pipeline.run() NEVER raises. Always returns a result (AggregateSuccess or AggregateFailure).
 
-### PipelineResult
+Pipelines are steps — use one pipeline as a step in another:
+
+```python
+checkout = Pipeline(name="checkout", steps=[validate, charge, confirm])
+full_flow = Pipeline(name="full_flow", steps=[checkout, ship, notify])
+```
+
+### Step result
 
 ```python
 result = await pipeline.run(args)
 
 if result.success:
-    # PipelineSuccess
-    result.data          # MappingProxyType[str, Any] — accumulated context
-    result.meta.pipeline # str — pipeline name
+    # AggregateSuccess
+    result.data          # dict[str, Any] — accumulated context
+    result.meta.name     # str — pipeline name
     result.meta.args     # Mapping[str, Any] — original args
     result.meta.steps_executed  # tuple[str, ...]
-    result.meta.steps_skipped   # tuple[str, ...]
 else:
-    # PipelineFailure
-    result.errors        # tuple[Exception, ...]
+    # AggregateFailure
+    result.error         # Exception
     result.failed_step   # str
     result.rollback      # RollbackReport
     result.rollback.completed  # tuple[str, ...]
@@ -111,7 +117,8 @@ from runsheet import when
 when(lambda ctx: ctx.get("amount", 0) > 10000, notify_manager)
 ```
 
-Skipped steps tracked in meta.steps_skipped, no rollback entry.
+Skipped steps produce no snapshot, no rollback entry, and do not appear in
+meta.steps_executed.
 
 ### parallel — concurrent execution
 
@@ -138,6 +145,29 @@ choice(
 
 First match wins. No match raises ChoiceNoMatchError.
 Only matched branch participates in rollback.
+
+### distribute — collection distribution
+
+```python
+from runsheet import distribute
+
+# Single collection — run step once per account_id
+distribute("emails", {"account_ids": "account_id"}, send_email)
+# Context: {"org_id": "org-1", "account_ids": ["a1", "a2"]}
+# Output:  {"emails": [{"email_id": "email-a1"}, {"email_id": "email-a2"}]}
+
+# Cross product — run once per (account_id, region_id) pair
+distribute(
+    "reports",
+    {"account_ids": "account_id", "region_ids": "region_id"},
+    generate_report,
+)
+# 2 accounts x 3 regions = 6 concurrent executions
+```
+
+Mapping dict connects context array keys to step scalar input keys.
+Non-mapped context keys pass through unchanged. Items run concurrently.
+Supports partial-failure rollback and external-failure rollback.
 
 ### map_step — collection iteration
 
@@ -221,3 +251,4 @@ RunsheetErrorCode is a StrEnum with all code values.
 5. Last writer wins for context keys (strict=True detects at build time)
 6. pipeline.run() never raises
 7. Middleware wraps full lifecycle; combinator inner steps bypass middleware
+8. Pipelines are steps — composable as nested steps in outer pipelines

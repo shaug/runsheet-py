@@ -7,30 +7,101 @@
 
 Type-safe, composable business logic pipelines for Python.
 
+```python
+from pydantic import BaseModel
+from runsheet import Pipeline, step
+
+class OrderInput(BaseModel):
+    order_id: str
+    amount: float
+
+class ValidatedOrder(BaseModel):
+    validated: bool
+
+class ChargeOutput(BaseModel):
+    charge_id: str
+
+@step(requires=OrderInput, provides=ValidatedOrder)
+async def validate_order(ctx: OrderInput) -> ValidatedOrder:
+    if ctx.amount <= 0:
+        raise ValueError("Invalid amount")
+    return ValidatedOrder(validated=True)
+
+@step(requires=OrderInput, provides=ChargeOutput)
+async def charge_payment(ctx: OrderInput) -> ChargeOutput:
+    charge = await stripe.charges.create(amount=ctx.amount)
+    return ChargeOutput(charge_id=charge.id)
+
+@charge_payment.rollback
+async def undo_charge(ctx: OrderInput, output: ChargeOutput) -> None:
+    await stripe.refunds.create(charge=output.charge_id)
+
+checkout = Pipeline(
+    name="checkout",
+    steps=[validate_order, charge_payment, send_confirmation],
+)
+
+result = await checkout.run(OrderInput(order_id="123", amount=50.0))
+# result.data["charge_id"] — accumulated context, validated at every boundary
+```
+
 ## Why runsheet
 
 Business logic has a way of growing into tangled, hard-to-test code. A checkout flow starts as one function, then gains validation, payment processing, inventory reservation, email notifications — each with its own failure modes and cleanup logic. Before long you're staring at a 300-line function with nested try/except blocks and no clear way to reuse any of it.
 
-runsheet gives that logic structure. You break work into small, focused steps with explicit inputs and outputs, then compose them into pipelines. Each step is independently testable. The pipeline handles context passing, rollback on failure, and schema validation at every boundary. Immutable data semantics mean steps can't accidentally interfere with each other.
+runsheet gives that logic structure. You break work into small, focused steps with explicit inputs and outputs, then compose them into pipelines. Each step is independently testable. The pipeline handles context accumulation — args persist, outputs merge — along with rollback on failure and Pydantic validation at step boundaries. Immutable context boundaries mean steps can't accidentally interfere with each other.
 
-It's an organizational layer for business logic that encourages reuse, testability, type safety, and immutable data flow — without the overhead of a full effect system or workflow engine.
+runsheet is for **in-process business logic orchestration** — multi-step flows inside an application service. It is not a distributed workflow engine, job queue, or durable execution runtime. That said, the two are complementary: a runsheet pipeline works well as the business logic inside a [Temporal](https://temporal.io/) activity or an [Inngest](https://www.inngest.com/) function handler.
 
 The name takes its inspiration from the world of stage productions and live broadcast events. A runsheet is the document that sequences every cue, handoff, and contingency so the show runs smoothly. Same idea here: you define the steps, and runsheet makes sure they execute in order with clear contracts between them.
 
-## What this is
+## When to use it
 
-Args persist and outputs accumulate. That's the core model — initial arguments flow through the entire pipeline, each step's output merges into the context, and every step sees the full picture of everything before it.
+**Good fit:**
 
-A pipeline orchestration library with:
+- Multi-step business flows — checkout, onboarding, provisioning, data import
+- Operations that need compensating actions (rollback) on failure
+- Reusable orchestration shared across handlers, jobs, and routes
+- Logic where schema-checked boundaries between steps add confidence
+- Anywhere you'd otherwise write a long imperative function with a growing number of intermediate variables and try/except blocks
 
-- **Typed steps** — each step declares `requires` and `provides` as Pydantic models. Your IDE shows exact input and output shapes. Both sync and async functions are supported.
-- **Validated boundaries** — Pydantic validates context against `requires` before each step and validates output against `provides` after. Mismatches fail fast with clear errors.
-- **Immutable step boundaries** — context is frozen between steps via `MappingProxyType`. Each step receives a snapshot and returns only what it adds.
-- **Rollback with snapshots** — on failure, rollback handlers execute in reverse order. Each receives the pre-step context and the step's output.
-- **Middleware** — cross-cutting concerns (logging, timing, metrics) wrap the full step lifecycle.
-- **Standalone** — no framework dependencies beyond Pydantic. Works anywhere Python runs.
+**Not the right tool:**
 
-**runsheet is NOT** a workflow engine (not Temporal, not Airflow, not Prefect). No persistence, no cross-process coordination. Strictly local, single-call orchestration. That said, it's complementary — you could use a runsheet pipeline as a step within a Temporal workflow or an Inngest function.
+- Trivial one-off functions that don't benefit from step decomposition
+- Long-running durable workflows that survive process restarts — use [Temporal](https://temporal.io/) or [Inngest](https://www.inngest.com/)
+- Cross-service event choreography — use a message bus
+- Simple CRUD handlers with no orchestration complexity
+
+## What you get
+
+### Typed accumulated context
+
+Args persist and outputs accumulate. Initial arguments flow through the entire pipeline, each step's output merges into the context, and every step sees the full picture of everything before it.
+
+### Immutable step boundaries
+
+Context is frozen (`MappingProxyType`) at every step boundary — this is a guarantee, not an implementation detail. Each step receives a read-only snapshot and returns only what it adds. Steps cannot mutate shared pipeline state; the pipeline engine manages accumulation. This eliminates a class of bugs where step B accidentally corrupts step A's data, and it makes rollback reliable because each handler receives the exact snapshot from before the step ran.
+
+### Pydantic validation at boundaries
+
+Each step declares `requires` and `provides` as Pydantic models. Pydantic validates context against `requires` before each step and validates output against `provides` after. Mismatches fail fast with clear errors. Your IDE shows exact input and output shapes.
+
+### Rollback with snapshots
+
+On failure, rollback handlers execute in reverse order. Each handler receives the pre-step context snapshot and the step's output, so it knows exactly what to undo. Rollback is best-effort: if a handler raises, remaining rollbacks still execute.
+
+### Compared to alternatives
+
+| Capability                      | Plain functions | Ad hoc orchestration | runsheet                  |
+| ------------------------------- | --------------- | -------------------- | ------------------------- |
+| Reusable business steps         | Manual          | Manual               | Built-in                  |
+| Typed accumulated context       | —               | Manual               | Built-in                  |
+| Rollback / compensation         | Manual          | Manual               | Automatic, snapshot-based |
+| Schema validation at boundaries | —               | Manual               | Pydantic at every step    |
+| Middleware (logging, timing)    | Manual          | Manual               | Built-in                  |
+| Control-flow combinators        | Manual          | Manual               | Built-in                  |
+| Composable (nest pipelines)     | Manual          | Difficult            | Pipelines are steps       |
+| Immutable context boundaries    | —               | Rarely               | Always (`MappingProxyType`) |
 
 ## Install
 
@@ -89,13 +160,11 @@ async def undo_charge(ctx: OrderInput, output: ChargeOutput) -> None:
     await stripe.refunds.create(charge=output.charge_id)
 ```
 
-Each step is fully typed — your IDE can see its exact input and output shapes, and Pydantic validates at every boundary.
-
 ### Build and run a pipeline
 
 ```python
 import asyncio
-from runsheet import Pipeline
+from runsheet import Pipeline, AggregateSuccess, AggregateFailure
 
 checkout = Pipeline(
     name="checkout",
@@ -109,11 +178,82 @@ if result.success:
     print(result.data["charge_id"])   # accumulated context
     print(result.data["email_sent"])
 else:
-    print(result.errors)              # what went wrong
-    print(result.rollback)            # { completed: [...], failed: [...] }
+    print(result.error)               # what went wrong
+    print(result.rollback)            # RollbackReport(completed=..., failed=...)
 ```
 
-`pipeline.run()` never raises. It always returns a `PipelineResult` — either `PipelineSuccess` or `PipelineFailure`.
+`pipeline.run()` never raises. It always returns a result — either `AggregateSuccess` or `AggregateFailure`.
+
+### A second example: workspace onboarding
+
+Steps compose across domains. The same patterns — typed inputs, rollback on failure, accumulated context — apply to any multi-step flow:
+
+```python
+from pydantic import BaseModel
+from runsheet import Pipeline, step
+
+
+class OnboardInput(BaseModel):
+    owner_email: str
+    plan: str
+
+
+class WorkspaceOutput(BaseModel):
+    workspace_id: str
+
+
+class ResourceOutput(BaseModel):
+    bucket_arn: str
+    db_url: str
+
+
+@step(requires=OnboardInput, provides=WorkspaceOutput)
+async def create_workspace(ctx: OnboardInput) -> WorkspaceOutput:
+    ws = await db.workspaces.create(owner=ctx.owner_email, plan=ctx.plan)
+    return WorkspaceOutput(workspace_id=ws.id)
+
+
+@create_workspace.rollback
+async def undo_workspace(ctx: OnboardInput, output: WorkspaceOutput) -> None:
+    await db.workspaces.delete(output.workspace_id)
+
+
+@step(provides=ResourceOutput)
+async def provision_resources(ctx: dict) -> ResourceOutput:
+    infra = await provisioner.create(ctx["workspace_id"], ctx["plan"])
+    return ResourceOutput(bucket_arn=infra.bucket_arn, db_url=infra.db_url)
+
+
+@provision_resources.rollback
+async def undo_resources(ctx: dict, output: ResourceOutput) -> None:
+    await provisioner.teardown(output.bucket_arn, output.db_url)
+
+
+onboard = Pipeline(
+    name="onboard_workspace",
+    steps=[create_workspace, provision_resources, send_welcome_email],
+)
+
+result = await onboard.run(OnboardInput(owner_email="alice@co.com", plan="team"))
+```
+
+If `send_welcome_email` fails, provisioned resources are torn down and the workspace is deleted — automatically, in reverse order.
+
+### Pipeline composition
+
+Pipelines are steps — use one pipeline as a step in another:
+
+```python
+checkout = Pipeline(
+    name="checkout",
+    steps=[validate_order, charge_payment, send_confirmation],
+)
+
+full_flow = Pipeline(
+    name="full_flow",
+    steps=[checkout, ship_order, notify_warehouse],
+)
+```
 
 ## Retry and timeout
 
@@ -156,7 +296,7 @@ checkout = Pipeline(
 )
 ```
 
-Skipped steps produce no snapshot, no rollback entry. The pipeline result tracks which steps were skipped in `result.meta.steps_skipped`.
+Skipped steps produce no snapshot, no rollback entry, and do not appear in `result.meta.steps_executed`.
 
 ## Parallel steps
 
@@ -175,7 +315,7 @@ checkout = Pipeline(
 )
 ```
 
-On partial failure, succeeded inner steps are rolled back before the error propagates. Inner steps retain their own `requires`/`provides` validation, `retry`, and `timeout` behavior.
+On partial failure, succeeded inner steps are rolled back before the error propagates. Inner steps retain their own `requires`/`provides` validation, `retry`, and `timeout` behavior. Conditional steps (via `when()`) work inside `parallel()`.
 
 ## Choice (branching)
 
@@ -202,7 +342,40 @@ Predicates are evaluated in order — first match wins. A bare step (without a t
 
 ## Collection combinators
 
-### Map (collection iteration)
+### Distribute (collection distribution)
+
+Fan out execution over one or more context collections, binding each item to the step's named scalar inputs. With multiple collections, `distribute` computes the cross product and runs the step once per combination.
+
+```python
+from runsheet import distribute
+
+# Single collection — run send_email once per account_id
+pipeline = Pipeline(
+    name="notify",
+    steps=[
+        distribute("emails", {"account_ids": "account_id"}, send_email),
+    ],
+)
+# Context: {"org_id": "org-1", "account_ids": ["a1", "a2"]}
+# Output:  {"emails": [{"email_id": "email-a1"}, {"email_id": "email-a2"}]}
+
+# Cross product — run once per (account_id, region_id) pair
+pipeline = Pipeline(
+    name="reports",
+    steps=[
+        distribute(
+            "reports",
+            {"account_ids": "account_id", "region_ids": "region_id"},
+            generate_report,
+        ),
+    ],
+)
+# 2 accounts x 3 regions = 6 concurrent executions
+```
+
+The mapping dict connects context array keys to the step's scalar input keys. All non-mapped context keys pass through unchanged. Items run concurrently and support partial-failure rollback.
+
+### Map (iteration)
 
 Iterate over a collection and run a function or step per item, concurrently:
 
@@ -216,9 +389,9 @@ pipeline = Pipeline(
         map_step(
             "emails",
             lambda ctx: ctx.get("users", []),
-            async lambda user, ctx: {
+            lambda user, ctx: {
                 "email": user["email"],
-                "sent_at": await send_email(user["email"]),
+                "sent_at": str(send_email(user["email"])),
             },
         ),
     ],
@@ -249,16 +422,9 @@ pipeline = Pipeline(
         map_step("emails", lambda ctx: ctx.get("eligible", []), send_email),
     ],
 )
-
-# Async predicate
-filter_step(
-    "valid",
-    lambda ctx: ctx.get("orders", []),
-    async lambda order, ctx: (await check_inventory(order["sku"])).available >= order["quantity"],
-)
 ```
 
-Predicates receive `(item, ctx)` and run concurrently. Original order is preserved. If any predicate throws, the step fails. No rollback (filtering is a pure operation).
+Predicates receive `(item, ctx)` and run concurrently. Original order is preserved. If any predicate raises, the step fails. No rollback (filtering is a pure operation).
 
 ### FlatMap (collection expansion)
 
@@ -340,22 +506,21 @@ if not result.success:
     result.rollback.failed      # (RollbackFailure(step="send_notification", error=...),)
 ```
 
-## Pipeline result
+## Step result
 
-Every pipeline returns a `PipelineResult` with execution metadata:
+Every `run()` returns a result with execution metadata:
 
 ```python
-# Success
+# Success (AggregateSuccess)
 result.success          # True
-result.data             # MappingProxyType — accumulated context, read-only
-result.meta.pipeline    # "checkout"
-result.meta.args        # MappingProxyType — original args snapshot
+result.data             # dict — accumulated context
+result.meta.name        # "checkout"
+result.meta.args        # Mapping — original args snapshot
 result.meta.steps_executed  # ("validate_order", "charge_payment", "send_confirmation")
-result.meta.steps_skipped   # ()
 
-# Failure
+# Failure (AggregateFailure)
 result.success          # False
-result.errors           # tuple of exceptions
+result.error            # Exception
 result.failed_step      # "charge_payment"
 result.rollback         # RollbackReport(completed=..., failed=...)
 result.meta             # same execution metadata
@@ -367,10 +532,10 @@ Middleware wraps the full step lifecycle including schema validation:
 
 ```python
 import time
-from runsheet import StepMiddleware
+from runsheet import StepInfo, StepMiddleware
 
 
-async def timing(step_info, next_fn, ctx):
+async def timing(step_info: StepInfo, next_fn, ctx):
     start = time.perf_counter()
     result = await next_fn(ctx)
     elapsed = time.perf_counter() - start
@@ -378,7 +543,7 @@ async def timing(step_info, next_fn, ctx):
     return result
 
 
-async def logging_mw(step_info, next_fn, ctx):
+async def logging_mw(step_info: StepInfo, next_fn, ctx):
     print(f"-> {step_info.name}")
     result = await next_fn(ctx)
     print(f"<- {step_info.name}")
@@ -400,15 +565,15 @@ All library errors are `RunsheetError` subclasses with a `code` discriminator. A
 from runsheet import RunsheetError, TimeoutError, RetryExhaustedError
 
 if not result.success:
-    for error in result.errors:
-        if isinstance(error, TimeoutError):
-            print(f"Timed out after {error.timeout_seconds}s")
-        elif isinstance(error, RetryExhaustedError):
-            print(f"Failed after {error.attempts} attempts")
-        elif isinstance(error, RunsheetError):
-            print(f"Library error: {error.code}")
-        else:
-            print(f"Application error: {error}")
+    error = result.error
+    if isinstance(error, TimeoutError):
+        print(f"Timed out after {error.timeout_seconds}s")
+    elif isinstance(error, RetryExhaustedError):
+        print(f"Failed after {error.attempts} attempts")
+    elif isinstance(error, RunsheetError):
+        print(f"Library error: {error.code}")
+    else:
+        print(f"Application error: {error}")
 ```
 
 ## Strict mode
@@ -444,7 +609,7 @@ Construct a pipeline from a list of steps.
 | Option        | Type                  | Description                                                       |
 | ------------- | --------------------- | ----------------------------------------------------------------- |
 | `name`        | `str`                 | Pipeline name                                                     |
-| `steps`       | `list[PipelineStep]`  | Steps to execute in order                                         |
+| `steps`       | `Sequence[Runnable]`  | Steps to execute in order                                         |
 | `args_schema` | `type[BaseModel]`     | Optional Pydantic model for pipeline input validation             |
 | `middleware`  | `list[StepMiddleware]` | Optional middleware                                              |
 | `strict`      | `bool`                | Optional — raises at build time if two steps provide the same key |
@@ -461,6 +626,10 @@ Run steps concurrently and merge outputs. On partial failure, succeeded inner st
 
 Execute the first branch whose predicate returns `True`. Each branch is a `(predicate, step)` tuple. A bare step as the last argument serves as a default.
 
+### `distribute(key, mapping, step)`
+
+Distribute collections from context across a step. The mapping dict connects context array keys to the step's scalar input keys. Runs the step once per item (single mapping) or once per cross-product combination (multiple mappings). Non-mapped context keys pass through. Supports per-item rollback on partial and external failure.
+
 ### `map_step(key, collection_fn, mapper)`
 
 Iterate over a collection. Mapper receives `(item, ctx)`. Accepts a function or a `Step` (items spread into context). Step form supports rollback on partial failure.
@@ -476,7 +645,7 @@ Map each item to a list, then flatten one level. Mapper receives `(item, ctx)`. 
 ### `StepMiddleware`
 
 ```python
-async def my_middleware(step_info: StepInfo, next_fn, ctx: dict) -> dict:
+async def my_middleware(step_info: StepInfo, next_fn, ctx: dict) -> StepResult:
     result = await next_fn(ctx)
     return result
 ```
