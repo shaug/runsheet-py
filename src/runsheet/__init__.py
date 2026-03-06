@@ -6,6 +6,7 @@ are never imported directly.
 
 from runsheet._collections import filter_step, flat_map, map_step
 from runsheet._combinators import choice, parallel, when
+from runsheet._distribute import distribute
 from runsheet._errors import (
     ArgsValidationError,
     ChoiceNoMatchError,
@@ -71,6 +72,7 @@ __all__ = [
     "TimeoutError",
     "UnknownError",
     "choice",
+    "distribute",
     "filter_step",
     "flat_map",
     "map_step",
