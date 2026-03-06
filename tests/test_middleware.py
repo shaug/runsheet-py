@@ -6,13 +6,14 @@ from typing import Any
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     StepInfo,
     step,
 )
 from runsheet._middleware import NextFn
+from runsheet._result import StepResult
 
 
 class Output(BaseModel):
@@ -25,7 +26,7 @@ class TestMiddleware:
 
         async def logging_mw(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
+        ) -> StepResult[Any]:
             log.append(f"before:{step_info.name}")
             result = await next_fn(ctx)
             log.append(f"after:{step_info.name}")
@@ -42,7 +43,7 @@ class TestMiddleware:
         )
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert log == ["before:my_step", "after:my_step"]
 
     async def test_middleware_order(self) -> None:
@@ -51,7 +52,7 @@ class TestMiddleware:
 
         async def outer(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
+        ) -> StepResult[Any]:
             log.append("outer_before")
             result = await next_fn(ctx)
             log.append("outer_after")
@@ -59,7 +60,7 @@ class TestMiddleware:
 
         async def inner(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
+        ) -> StepResult[Any]:
             log.append("inner_before")
             result = await next_fn(ctx)
             log.append("inner_after")
@@ -76,7 +77,7 @@ class TestMiddleware:
         )
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert log == [
             "outer_before",
             "inner_before",
@@ -85,10 +86,13 @@ class TestMiddleware:
         ]
 
     async def test_middleware_can_short_circuit(self) -> None:
+        from runsheet._internal import step_meta, step_success
+
         async def blocker(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
-            return {"value": 42}  # Short-circuit, don't call next_fn
+        ) -> StepResult[Any]:
+            # Short-circuit by returning a StepSuccess directly
+            return step_success({"value": 42}, step_meta(step_info.name, ctx))
 
         @step(provides=Output)
         async def my_step(ctx: dict) -> Output:  # type: ignore[type-arg]
@@ -100,7 +104,7 @@ class TestMiddleware:
             middleware=[blocker],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["value"] == 42
 
     async def test_middleware_timing(self) -> None:
@@ -108,7 +112,7 @@ class TestMiddleware:
 
         async def timing_mw(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
+        ) -> StepResult[Any]:
             start = time.perf_counter()
             result = await next_fn(ctx)
             times[step_info.name] = time.perf_counter() - start
@@ -132,7 +136,7 @@ class TestMiddleware:
 
         async def counter_mw(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
+        ) -> StepResult[Any]:
             nonlocal call_count
             call_count += 1
             return await next_fn(ctx)
@@ -156,18 +160,18 @@ class TestMiddleware:
         await pipeline.run({})
         assert call_count == 2
 
-    async def test_middleware_on_failure(self) -> None:
-        """Middleware can catch step failures."""
-        caught_errors: list[Exception] = []
+    async def test_middleware_sees_step_failure(self) -> None:
+        """Middleware receives StepResult failures (not exceptions)."""
+        saw_failure = False
 
-        async def error_catcher(
+        async def error_observer(
             step_info: StepInfo, next_fn: NextFn, ctx: dict[str, Any]
-        ) -> Any:
-            try:
-                return await next_fn(ctx)
-            except Exception as e:
-                caught_errors.append(e)
-                raise
+        ) -> StepResult[Any]:
+            nonlocal saw_failure
+            result = await next_fn(ctx)
+            if not result.success:
+                saw_failure = True
+            return result
 
         @step(provides=Output)
         async def failing(ctx: dict) -> Output:  # type: ignore[type-arg]
@@ -176,8 +180,8 @@ class TestMiddleware:
         pipeline = Pipeline(
             name="test",
             steps=[failing],
-            middleware=[error_catcher],
+            middleware=[error_observer],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert len(caught_errors) == 1
+        assert isinstance(result, AggregateFailure)
+        assert saw_failure

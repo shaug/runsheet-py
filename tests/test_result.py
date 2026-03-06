@@ -3,11 +3,15 @@
 from types import MappingProxyType
 
 from runsheet import (
-    PipelineExecutionMeta,
-    PipelineFailure,
-    PipelineSuccess,
+    EMPTY_ROLLBACK,
+    AggregateFailure,
+    AggregateMeta,
+    AggregateSuccess,
     RollbackFailure,
     RollbackReport,
+    StepFailure,
+    StepMeta,
+    StepSuccess,
 )
 
 
@@ -29,34 +33,46 @@ class TestRollbackTypes:
         assert rr.completed == ("step_a",)
         assert len(rr.failed) == 1
 
+    def test_empty_rollback_sentinel(self) -> None:
+        assert EMPTY_ROLLBACK.completed == ()
+        assert EMPTY_ROLLBACK.failed == ()
 
-class TestPipelineExecutionMeta:
+
+class TestStepMeta:
+    def test_step_meta(self) -> None:
+        meta = StepMeta(name="charge", args={"amount": 100})
+        assert meta.name == "charge"
+        assert meta.args == {"amount": 100}
+
+
+class TestAggregateMeta:
     def test_meta_defaults(self) -> None:
-        meta = PipelineExecutionMeta(
-            pipeline="test",
+        meta = AggregateMeta(
+            name="test",
             args=MappingProxyType({}),
         )
-        assert meta.pipeline == "test"
+        assert meta.name == "test"
         assert meta.steps_executed == ()
-        assert meta.steps_skipped == ()
 
-
-class TestPipelineSuccess:
-    def test_success_fields(self) -> None:
-        meta = PipelineExecutionMeta(
-            pipeline="test",
-            args=MappingProxyType({}),
+    def test_meta_with_steps(self) -> None:
+        meta = AggregateMeta(
+            name="test",
+            args={},
             steps_executed=("a", "b"),
         )
-        result = PipelineSuccess(data={"charge_id": "ch_1"}, meta=meta)
+        assert meta.steps_executed == ("a", "b")
+
+
+class TestStepSuccess:
+    def test_fields(self) -> None:
+        meta = StepMeta(name="charge", args={})
+        result = StepSuccess(data={"charge_id": "ch_1"}, meta=meta)
         assert result.success is True
         assert result.data == {"charge_id": "ch_1"}
-        assert result.errors == ()
-        assert result.meta.steps_executed == ("a", "b")
 
-    def test_success_is_frozen(self) -> None:
-        meta = PipelineExecutionMeta(pipeline="test", args=MappingProxyType({}))
-        result = PipelineSuccess(data={}, meta=meta)
+    def test_frozen(self) -> None:
+        meta = StepMeta(name="charge", args={})
+        result = StepSuccess(data={}, meta=meta)
         try:
             result.success = False  # type: ignore[misc]
             raise AssertionError("Should have raised")
@@ -64,27 +80,60 @@ class TestPipelineSuccess:
             pass
 
 
-class TestPipelineFailure:
+class TestStepFailure:
+    def test_fields(self) -> None:
+        meta = StepMeta(name="charge", args={})
+        err = ValueError("fail")
+        result = StepFailure(error=err, meta=meta, failed_step="charge")
+        assert result.success is False
+        assert result.error is err
+        assert result.failed_step == "charge"
+        assert result.rollback is EMPTY_ROLLBACK
+
+
+class TestAggregateSuccess:
+    def test_success_fields(self) -> None:
+        meta = AggregateMeta(
+            name="test",
+            args=MappingProxyType({}),
+            steps_executed=("a", "b"),
+        )
+        result = AggregateSuccess(data={"charge_id": "ch_1"}, meta=meta)
+        assert result.success is True
+        assert result.data == {"charge_id": "ch_1"}
+        assert result.meta.steps_executed == ("a", "b")
+
+    def test_success_is_frozen(self) -> None:
+        meta = AggregateMeta(name="test", args=MappingProxyType({}))
+        result = AggregateSuccess(data={}, meta=meta)
+        try:
+            result.success = False  # type: ignore[misc]
+            raise AssertionError("Should have raised")
+        except AttributeError:
+            pass
+
+
+class TestAggregateFailure:
     def test_failure_fields(self) -> None:
-        meta = PipelineExecutionMeta(
-            pipeline="test",
+        meta = AggregateMeta(
+            name="test",
             args=MappingProxyType({}),
         )
         err = ValueError("fail")
-        result = PipelineFailure(
-            errors=(err,),
+        result = AggregateFailure(
+            error=err,
             meta=meta,
             failed_step="charge",
             rollback=RollbackReport(),
         )
         assert result.success is False
-        assert result.errors == (err,)
+        assert result.error is err
         assert result.failed_step == "charge"
 
     def test_failure_is_frozen(self) -> None:
-        meta = PipelineExecutionMeta(pipeline="test", args=MappingProxyType({}))
-        result = PipelineFailure(
-            errors=(ValueError("x"),),
+        meta = AggregateMeta(name="test", args=MappingProxyType({}))
+        result = AggregateFailure(
+            error=ValueError("x"),
             meta=meta,
             failed_step="x",
             rollback=RollbackReport(),

@@ -1,12 +1,14 @@
 """Tests for choice (branching)."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     ChoiceNoMatchError,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     PredicateError,
     choice,
     step,
@@ -49,7 +51,7 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "card"})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["method"] == "card"
         assert result.data["charge_id"] == "card_1"
 
@@ -73,7 +75,7 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "bank"})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["method"] == "bank"
 
     async def test_default_branch(self) -> None:
@@ -98,7 +100,7 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "crypto"})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["method"] == "default"
 
     async def test_no_match_error(self) -> None:
@@ -116,8 +118,8 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "crypto"})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], ChoiceNoMatchError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, ChoiceNoMatchError)
 
     async def test_only_matched_branch_in_rollback(self) -> None:
         """Only the matched branch participates in rollback."""
@@ -158,7 +160,7 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "card"})
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         # Only card should be rolled back (it was the matched branch)
         assert rollback_log == ["card"]
 
@@ -167,7 +169,7 @@ class TestChoice:
         async def charge_card(ctx: dict) -> CardOutput:  # type: ignore[type-arg]
             return CardOutput(charge_id="card_1", method="card")
 
-        def bad_pred(ctx: dict) -> bool:  # type: ignore[type-arg]
+        def bad_pred(ctx: dict[str, Any]) -> bool:
             raise RuntimeError("pred exploded")
 
         pipeline = Pipeline(
@@ -176,5 +178,5 @@ class TestChoice:
         )
 
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], PredicateError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, PredicateError)

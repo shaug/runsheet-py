@@ -1,11 +1,13 @@
 """Tests for when (conditional steps)."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     PredicateError,
     step,
     when,
@@ -27,7 +29,7 @@ class TestWhen:
             steps=[when(lambda ctx: True, notify)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["notified"] is True
 
     async def test_when_false_skips_step(self) -> None:
@@ -40,9 +42,8 @@ class TestWhen:
             steps=[when(lambda ctx: False, notify)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert "notified" not in result.data
-        assert result.meta.steps_skipped == ("notify",)
 
     async def test_when_uses_context(self) -> None:
         @step(provides=Output)
@@ -55,11 +56,11 @@ class TestWhen:
         )
 
         result = await pipeline.run({"amount": 50})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert "notified" not in result.data
 
         result = await pipeline.run({"amount": 200})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["notified"] is True
 
     async def test_when_predicate_error_triggers_rollback(self) -> None:
@@ -81,7 +82,7 @@ class TestWhen:
         async def notify(ctx: dict) -> Output:  # type: ignore[type-arg]
             return Output(notified=True)
 
-        def bad_predicate(ctx: dict) -> bool:  # type: ignore[type-arg]
+        def bad_predicate(ctx: dict[str, Any]) -> bool:
             raise RuntimeError("predicate exploded")
 
         pipeline = Pipeline(
@@ -89,8 +90,8 @@ class TestWhen:
             steps=[init_step, when(bad_predicate, notify)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], PredicateError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, PredicateError)
         assert rollback_called
 
     async def test_skipped_step_no_rollback(self) -> None:
@@ -120,7 +121,7 @@ class TestWhen:
             ],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         # Notify was skipped, so its rollback should NOT run
         assert rollback_log == []
 
@@ -129,7 +130,7 @@ class TestWhen:
         async def notify(ctx: dict) -> Output:  # type: ignore[type-arg]
             return Output(notified=True)
 
-        async def async_pred(ctx: dict) -> bool:  # type: ignore[type-arg]
+        async def async_pred(ctx: dict[str, Any]) -> bool:
             return True
 
         pipeline = Pipeline(
@@ -137,5 +138,5 @@ class TestWhen:
             steps=[when(async_pred, notify)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["notified"] is True

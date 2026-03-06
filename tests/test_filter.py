@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from runsheet import Pipeline, PipelineSuccess, filter_step
+from runsheet import AggregateSuccess, Pipeline, filter_step
 
 
 class TestFilter:
@@ -18,7 +18,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"numbers": [1, 2, 3, 4, 5, 6]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["evens"] == [2, 4, 6]
 
     async def test_async_predicate(self) -> None:
@@ -36,7 +36,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"numbers": [1, 2, 3, 4]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["evens"] == [2, 4]
 
     async def test_preserves_order(self) -> None:
@@ -51,7 +51,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"numbers": [5, 1, 4, 2, 6, 3]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["big"] == [5, 4, 6]
 
     async def test_empty_result(self) -> None:
@@ -66,7 +66,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"items": [1, 2, 3]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["filtered"] == []
 
     async def test_all_pass(self) -> None:
@@ -81,7 +81,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"items": [1, 2, 3]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["all"] == [1, 2, 3]
 
     async def test_empty_collection(self) -> None:
@@ -96,7 +96,7 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["filtered"] == []
 
     async def test_predicate_receives_context(self) -> None:
@@ -118,6 +118,6 @@ class TestFilter:
             ],
         )
         result = await pipeline.run({"numbers": [1, 5, 10], "threshold": 4})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["above"] == [5, 10]
         assert received_ctx["threshold"] == 4

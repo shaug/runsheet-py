@@ -1,8 +1,10 @@
 """Tests for rollback behavior."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
-from runsheet import Pipeline, PipelineFailure, step
+from runsheet import AggregateFailure, Pipeline, step
 
 
 class OutputA(BaseModel):
@@ -45,28 +47,32 @@ class TestRollbackOrder:
         pipeline = Pipeline(name="test", steps=[step_a, step_b, step_c])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert log == ["b", "a"]
 
     async def test_rollback_receives_correct_snapshots(self) -> None:
         """Each handler receives pre-step context and step output."""
-        snapshots: list[tuple[dict, dict]] = []  # type: ignore[type-arg]
+        snapshots: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
         @step(provides=OutputA)
         async def step_a(ctx: dict) -> OutputA:  # type: ignore[type-arg]
             return OutputA(a="value_a")
 
         @step_a.rollback
-        async def undo_a(ctx: dict, output: dict) -> None:  # type: ignore[type-arg]
+        async def undo_a(ctx: dict[str, Any], output: dict[str, Any]) -> None:
             snapshots.append((dict(ctx), dict(output)))
+
+        _ = undo_a  # registered via decorator
 
         @step(provides=OutputB)
         async def step_b(ctx: dict) -> OutputB:  # type: ignore[type-arg]
             return OutputB(b="value_b")
 
         @step_b.rollback
-        async def undo_b(ctx: dict, output: dict) -> None:  # type: ignore[type-arg]
+        async def undo_b(ctx: dict[str, Any], output: dict[str, Any]) -> None:
             snapshots.append((dict(ctx), dict(output)))
+
+        _ = undo_b  # registered via decorator
 
         @step(provides=OutputC)
         async def step_c(ctx: dict) -> OutputC:  # type: ignore[type-arg]
@@ -75,7 +81,7 @@ class TestRollbackOrder:
         pipeline = Pipeline(name="test", steps=[step_a, step_b, step_c])
         result = await pipeline.run({"init": "data"})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         # step_b rollback: pre-ctx has init+a, output is b
         b_ctx, b_out = snapshots[0]
         assert b_ctx.get("init") == "data"
@@ -102,7 +108,7 @@ class TestRollbackOrder:
         pipeline = Pipeline(name="test", steps=[step_a])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert log == []  # step_a never succeeded, so no rollback
 
     async def test_steps_without_rollback_are_skipped(self) -> None:
@@ -130,7 +136,7 @@ class TestRollbackOrder:
         pipeline = Pipeline(name="test", steps=[step_a, step_b, step_c])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert log == ["a"]  # Only step_a's rollback runs
 
     async def test_rollback_error_collection(self) -> None:
@@ -151,6 +157,6 @@ class TestRollbackOrder:
         pipeline = Pipeline(name="test", steps=[step_a, step_b])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert len(result.rollback.failed) == 1
         assert result.rollback.failed[0].step == "step_a"

@@ -1,11 +1,13 @@
 """Tests for map_step."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     map_step,
     step,
 )
@@ -24,11 +26,11 @@ class TestMapFunctionForm:
             ],
         )
         result = await pipeline.run({"numbers": [1, 2, 3]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["doubled"] == [2, 4, 6]
 
     async def test_async_mapper(self) -> None:
-        async def double(item: int, ctx: dict) -> int:  # type: ignore[type-arg]
+        async def double(item: int, ctx: dict[str, Any]) -> int:
             return item * 2
 
         pipeline = Pipeline(
@@ -38,7 +40,7 @@ class TestMapFunctionForm:
             ],
         )
         result = await pipeline.run({"numbers": [1, 2, 3]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["doubled"] == [2, 4, 6]
 
     async def test_map_with_context(self) -> None:
@@ -53,7 +55,7 @@ class TestMapFunctionForm:
             ],
         )
         result = await pipeline.run({"items": ["a", "b"], "prefix": "x"})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["results"] == ["a_x", "b_x"]
 
     async def test_map_empty_collection(self) -> None:
@@ -68,7 +70,7 @@ class TestMapFunctionForm:
             ],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["results"] == []
 
 
@@ -92,7 +94,7 @@ class TestMapStepForm:
             ],
         )
         result = await pipeline.run({"items": [{"id": 1}, {"id": 2}]})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert len(result.data["results"]) == 2
         assert all(r["processed"] for r in result.data["results"])
 
@@ -105,10 +107,10 @@ class TestMapStepForm:
         call_count = 0
 
         @step(provides=ItemOutput)
-        async def process_item(ctx: dict) -> ItemOutput:  # type: ignore[type-arg]
+        async def process_item(ctx: dict[str, Any]) -> ItemOutput:
             nonlocal call_count
             call_count += 1
-            item_id = ctx.get("id", 0)
+            item_id: int = ctx.get("id", 0)
             if item_id == 2:
                 raise RuntimeError("item 2 failed")
             return ItemOutput(item_id=item_id)
@@ -129,6 +131,6 @@ class TestMapStepForm:
             ],
         )
         result = await pipeline.run({"items": [{"id": 1}, {"id": 2}, {"id": 3}]})
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         # Succeeded items should be rolled back
         assert rollback_count > 0

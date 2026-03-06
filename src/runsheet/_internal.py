@@ -1,75 +1,65 @@
 """Shared internal utilities.
 
-Centralizes error normalization, schema validation, and inner step execution
-to avoid duplication across pipeline, combinators, and collections.
+Result constructors, error normalization, context helpers, and predicate calling.
 """
 
 from __future__ import annotations
 
-import asyncio
-import builtins
 import inspect
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
-from pydantic import BaseModel, ValidationError
-
-from runsheet._errors import (
-    ProvidesValidationError,
-    RequiresValidationError,
-    RetryExhaustedError,
-    TimeoutError,
-    UnknownError,
+from runsheet._errors import UnknownError
+from runsheet._result import (
+    EMPTY_ROLLBACK,
+    AggregateMeta,
+    RollbackReport,
+    StepFailure,
+    StepMeta,
+    StepSuccess,
 )
-from runsheet._step import Step
+
+_T = TypeVar("_T")
+
+
+# ---------------------------------------------------------------------------
+# Error utilities
+# ---------------------------------------------------------------------------
 
 
 def to_error(value: object) -> Exception:
-    """Normalize any value to an Exception.
-
-    Application exceptions pass through as-is.
-    Non-Exception values get wrapped in UnknownError.
-    """
+    """Normalize any value to an Exception."""
     if isinstance(value, Exception):
         return value
     return UnknownError(f"Non-exception value raised: {value!r}", original_value=value)
 
 
-def validate_requires(step: Step, ctx: dict[str, Any]) -> BaseModel | None:
-    """Validate context against a step's requires schema.
+def collapse_errors(errors: list[Exception], message: str) -> Exception:
+    """Collapse a list of errors into a single error.
 
-    Returns the validated model instance, or None if no requires schema.
-    Raises RequiresValidationError on validation failure.
+    Returns the sole error when there is exactly one, otherwise wraps
+    them in an ExceptionGroup with the given message.
+
+    Raises ValueError if the list is empty.
     """
-    if step.requires is None:
-        return None
-    try:
-        return step.requires.model_validate(ctx)
-    except ValidationError as e:
-        raise RequiresValidationError(
-            f"Step '{step.name}' requires validation failed: {e}"
-        ) from e
+    if not errors:
+        raise ValueError("collapse_errors requires at least one error")
+    if len(errors) == 1:
+        return errors[0]
+    return ExceptionGroup(message, errors)
 
 
-def validate_provides(step: Step, output: Any) -> dict[str, Any]:
-    """Validate step output against its provides schema.
+# ---------------------------------------------------------------------------
+# Context utilities
+# ---------------------------------------------------------------------------
 
-    If a step declares provides, output MUST be an instance of that model.
-    If no provides, accept a dict or BaseModel and dump it.
-    """
-    if step.provides is None:
-        if isinstance(output, BaseModel):
-            return output.model_dump()
-        if isinstance(output, dict):
-            return cast(dict[str, Any], output)
-        return {}
 
-    if not isinstance(output, step.provides):
-        raise ProvidesValidationError(
-            f"Step '{step.name}' must return {step.provides.__name__}, "
-            f"got {type(output).__name__}"
-        )
-    return output.model_dump()
+def to_ctx_dict(ctx: object) -> dict[str, Any]:
+    """Normalize ctx to dict[str, Any]."""
+    if isinstance(ctx, dict):
+        return cast(dict[str, Any], ctx)
+    return {}
 
 
 def freeze_context(ctx: dict[str, Any]) -> MappingProxyType[str, Any]:
@@ -77,83 +67,71 @@ def freeze_context(ctx: dict[str, Any]) -> MappingProxyType[str, Any]:
     return MappingProxyType(ctx)
 
 
-async def run_with_timeout(coro: Any, timeout_seconds: float, step_name: str) -> Any:
-    """Execute a coroutine with a timeout. Uses asyncio.timeout (Python 3.11+)."""
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            return await coro
-    except builtins.TimeoutError as e:
-        raise TimeoutError(
-            f"Step '{step_name}' timed out after {timeout_seconds}s",
-            timeout_seconds=timeout_seconds,
-        ) from e
+def partition_settled(
+    results: Sequence[object],
+) -> tuple[list[object], list[Exception]]:
+    """Partition gather(return_exceptions=True) results into values and errors.
 
-
-async def _run_step_once(step: Step, step_input: Any) -> Any:
-    """Run a step once, with timeout if configured."""
-    if step.timeout is not None:
-        return await run_with_timeout(step.run(step_input), step.timeout, step.name)
-    return await step.run(step_input)
-
-
-async def _execute_with_retry_and_timeout(step: Step, step_input: Any) -> Any:
-    """Execute a step with retry and/or timeout. Returns raw output."""
-    if step.retry is None:
-        return await _run_step_once(step, step_input)
-
+    BaseExceptions that aren't Exceptions are wrapped via to_error().
+    Returns (values, errors) where values are the non-exception results.
+    """
+    values: list[object] = []
     errors: list[Exception] = []
-    total_attempts = 1 + step.retry.count
+    for r in results:
+        if isinstance(r, BaseException):
+            errors.append(r if isinstance(r, Exception) else to_error(r))
+        else:
+            values.append(r)
+    return values, errors
 
-    for attempt in range(total_attempts):
-        try:
-            return await _run_step_once(step, step_input)
-        except Exception as e:
-            errors.append(e)
-            if attempt < total_attempts - 1:
-                if step.retry.retry_if is not None and not step.retry.retry_if(errors):
-                    break
-                if step.retry.delay > 0:
-                    if step.retry.backoff == "exponential":
-                        delay = step.retry.delay * (2**attempt)
-                    else:
-                        delay = step.retry.delay
-                    await asyncio.sleep(delay)
 
-    last_error = errors[-1] if errors else Exception("Unknown retry failure")
-    raise RetryExhaustedError(
-        f"Step '{step.name}' failed after {len(errors)} attempt(s)",
-        attempts=len(errors),
-        last_error=last_error,
+# ---------------------------------------------------------------------------
+# Result constructors
+# ---------------------------------------------------------------------------
+
+
+def step_meta(name: str, args: Mapping[str, Any]) -> StepMeta:
+    """Create StepMeta with a frozen copy of args."""
+    return StepMeta(name=name, args=MappingProxyType(dict(args)))
+
+
+def step_success(data: _T, meta: StepMeta) -> StepSuccess[_T]:
+    return StepSuccess(data=data, meta=meta)
+
+
+def step_failure(
+    error: Exception,
+    meta: StepMeta,
+    failed_step: str,
+    rollback: RollbackReport = EMPTY_ROLLBACK,
+) -> StepFailure:
+    return StepFailure(
+        error=error, meta=meta, failed_step=failed_step, rollback=rollback
     )
 
 
-async def execute_step(step: Step, ctx: dict[str, Any]) -> dict[str, Any]:
-    """Execute a single step with validation, retry, and timeout.
-
-    This is the shared inner step lifecycle used by the pipeline engine
-    and all combinators.
-    """
-    # 1. Validate requires
-    validated_input = validate_requires(step, ctx)
-    step_input = validated_input if validated_input is not None else ctx
-
-    # 2. Execute with retry and/or timeout
-    raw_output: Any = await _execute_with_retry_and_timeout(step, step_input)
-
-    # 3. Validate provides
-    return validate_provides(step, raw_output)
+def aggregate_meta(
+    name: str,
+    args: Mapping[str, Any],
+    steps_executed: tuple[str, ...],
+) -> AggregateMeta:
+    return AggregateMeta(
+        name=name,
+        args=args,
+        steps_executed=steps_executed,
+    )
 
 
-async def call_predicate(predicate: Any, ctx: dict[str, Any]) -> bool:
-    """Call a predicate function (sync or async) with context.
+# ---------------------------------------------------------------------------
+# Predicate helper
+# ---------------------------------------------------------------------------
 
-    Open question decision: context type for predicate lambdas.
-    Predicates receive a plain ``dict[str, Any]`` — the most flexible option,
-    matching the TS version's plain object.  Alternatives considered:
-    ``MappingProxyType`` (read-only but no attribute access),
-    ``SimpleNamespace`` (attribute access but no type safety),
-    Pydantic model (typed but requires knowing accumulated shape).
-    """
+
+async def call_predicate(
+    predicate: Callable[[dict[str, Any]], object],
+    ctx: dict[str, Any],
+) -> bool:
+    """Call a predicate function (sync or async) with context."""
     result = predicate(ctx)
     if inspect.isawaitable(result):
         return bool(await result)

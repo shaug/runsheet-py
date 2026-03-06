@@ -1,13 +1,14 @@
 """Tests for parallel steps."""
 
 import asyncio
+from typing import Any
 
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     parallel,
     step,
 )
@@ -47,7 +48,7 @@ class TestParallel:
         )
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["charge_id"] == "ch_1"
         assert result.data["reservation_id"] == "res_1"
         # Both should have started (concurrency)
@@ -68,7 +69,7 @@ class TestParallel:
             steps=[parallel(charge, reserve)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["charge_id"] == "ch_1"
         assert result.data["reservation_id"] == "res_1"
 
@@ -93,21 +94,21 @@ class TestParallel:
             steps=[parallel(charge, reserve)],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         # charge succeeded, so it should be rolled back
         assert "charge" in rollback_log
 
     async def test_parallel_all_receive_same_context(self) -> None:
         """All inner steps receive the pre-parallel context."""
-        seen_ctxs: list[dict] = []  # type: ignore[type-arg]
+        seen_ctxs: list[dict[str, Any]] = []
 
         @step(provides=ChargeOutput)
-        async def charge(ctx: dict) -> ChargeOutput:  # type: ignore[type-arg]
+        async def charge(ctx: dict[str, Any]) -> ChargeOutput:
             seen_ctxs.append(dict(ctx))
             return ChargeOutput(charge_id="ch_1")
 
         @step(provides=ReservationOutput)
-        async def reserve(ctx: dict) -> ReservationOutput:  # type: ignore[type-arg]
+        async def reserve(ctx: dict[str, Any]) -> ReservationOutput:
             seen_ctxs.append(dict(ctx))
             return ReservationOutput(reservation_id="res_1")
 
@@ -150,7 +151,7 @@ class TestParallel:
             ],
         )
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["initialized"] is True
         assert result.data["charge_id"] == "ch_1"
         assert result.data["reservation_id"] == "res_1"

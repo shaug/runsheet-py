@@ -1,11 +1,8 @@
 """Collection combinators: map_step, filter_step, flat_map.
 
-Items run concurrently via asyncio.gather.
-
-Open question decision: naming for map/filter.
-Chose ``map_step`` / ``filter_step`` — avoids shadowing the Python builtins
-``map`` and ``filter`` while staying descriptive.  Alternatives considered:
-``map_each``, ``for_each``, ``keep``, ``where``, ``select``.
+Items run concurrently via asyncio.gather with return_exceptions=True
+so all items complete before errors are collected. All return _FnStep
+instances whose run() returns StepResult.
 """
 
 from __future__ import annotations
@@ -14,218 +11,261 @@ import asyncio
 import contextlib
 import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
-from runsheet._combinator_base import CombinatorResult
-from runsheet._internal import execute_step
-from runsheet._rollback import ExecutedStep
-from runsheet._step import Step
+from runsheet._internal import (
+    collapse_errors,
+    partition_settled,
+    step_failure,
+    step_meta,
+    step_success,
+    to_ctx_dict,
+    to_error,
+)
+from runsheet._result import StepFailure, StepMeta, StepResult
+from runsheet._step import Step, _FnStep
 
-
-class _MapStep:
-    """Collection iteration — function form or step form.
-
-    Function form: apply a function to each item, collect results under a key.
-    Step form: run an existing step for each item (item merged into context).
-    """
-
-    def __init__(
-        self,
-        key: str,
-        collection_fn: Callable[..., Any],
-        mapper: Callable[..., Any] | Step,
-    ) -> None:
-        self.name = f"map({key})"
-        self._key = key
-        self._collection_fn = collection_fn
-        self._mapper = mapper
-
-    async def execute(self, ctx: dict[str, Any]) -> CombinatorResult:
-        items = self._collection_fn(ctx)
-        if inspect.isawaitable(items):
-            items = await items
-
-        if isinstance(self._mapper, Step):
-            return await self._execute_step_form(ctx, list(items))
-        return await self._execute_fn_form(ctx, list(items))
-
-    async def _execute_fn_form(
-        self, ctx: dict[str, Any], items: list[Any]
-    ) -> CombinatorResult:
-        mapper = self._mapper
-        assert callable(mapper) and not isinstance(mapper, Step)
-
-        async def run_one(item: Any) -> Any:
-            result = mapper(item, ctx)
-            if inspect.isawaitable(result):
-                return await result
-            return result
-
-        results = await asyncio.gather(*(run_one(item) for item in items))
-        return CombinatorResult(output={self._key: list(results)})
-
-    async def _execute_step_form(
-        self, ctx: dict[str, Any], items: list[Any]
-    ) -> CombinatorResult:
-        step = self._mapper
-        assert isinstance(step, Step)
-        pre_ctx = dict(ctx)
-
-        async def run_one(
-            item: Any,
-        ) -> tuple[dict[str, Any], Exception | None]:
-            # Merge item into context so the step sees both
-            item_ctx: dict[str, Any]
-            if isinstance(item, dict):
-                item_ctx = {**ctx, **item}
-            elif isinstance(item, BaseModel):
-                item_ctx = {**ctx, **item.model_dump()}
-            else:
-                item_ctx = dict(ctx)
-            try:
-                output = await execute_step(step, item_ctx)
-                return output, None
-            except Exception as e:
-                return {}, e
-
-        results = await asyncio.gather(*(run_one(item) for item in items))
-
-        errors: list[Exception] = []
-        succeeded: list[dict[str, Any]] = []
-        for output, error in results:
-            if error is not None:
-                errors.append(error)
-            else:
-                succeeded.append(output)
-
-        if errors:
-            # Rollback succeeded items in reverse order
-            for output in reversed(succeeded):
-                if step.has_rollback:
-                    with contextlib.suppress(Exception):
-                        await step.run_rollback(pre_ctx, output)
-            raise errors[0]
-
-        executed = [
-            ExecutedStep(step=step, pre_ctx=pre_ctx, output=output)
-            for output in succeeded
-        ]
-
-        return CombinatorResult(output={self._key: succeeded}, executed=executed)
+# ---------------------------------------------------------------------------
+# map_step
+# ---------------------------------------------------------------------------
 
 
 def map_step(
     key: str,
-    collection_fn: Callable[..., Any],
-    mapper: Callable[..., Any] | Step,
-) -> _MapStep:
-    """Create a map step that iterates over a collection.
+    collection_fn: Callable[[dict[str, Any]], Any],
+    mapper: Callable[[Any, dict[str, Any]], Any] | Step,
+) -> _FnStep:
+    """Map over a collection. Function form or step form."""
+    step_name = f"map({key})"
 
-    Function form: mapper(item, ctx) -> result
-    Step form: mapper is a Step, each item merged into context.
-    Items run concurrently. On partial failure (step form), succeeded items
-    are rolled back.
-    """
-    return _MapStep(key, collection_fn, mapper)
+    async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
+        ctx_dict = to_ctx_dict(ctx)
+        meta = step_meta(step_name, ctx_dict)
+
+        try:
+            items = collection_fn(ctx_dict)
+            if inspect.isawaitable(items):
+                items = await items
+            items_list: list[object] = list(items)
+        except Exception as e:
+            return step_failure(to_error(e), meta, step_name)
+
+        if isinstance(mapper, Step):
+            return await _map_step_form(
+                key, mapper, ctx_dict, items_list, meta
+            )
+        return await _map_fn_form(
+            key, mapper, ctx_dict, items_list, meta
+        )
+
+    return _FnStep(name=step_name, run_fn=run_fn)
 
 
-class _FilterStep:
-    """Collection filtering — keep items where predicate returns True.
+async def _map_fn_form(
+    key: str,
+    mapper: Callable[[Any, dict[str, Any]], Any],
+    ctx: dict[str, Any],
+    items: list[object],
+    meta: StepMeta,
+) -> StepResult[dict[str, Any]]:
+    async def run_one(item: object) -> object:
+        result = mapper(item, ctx)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
-    Predicates run concurrently. Original order preserved. No rollback.
-    Supports sync and async predicates.
-    """
+    raw = await asyncio.gather(
+        *(run_one(item) for item in items),
+        return_exceptions=True,
+    )
+    values, errors = partition_settled(raw)
 
-    def __init__(
-        self,
-        key: str,
-        collection_fn: Callable[..., Any],
-        predicate: Callable[..., Any],
-    ) -> None:
-        self.name = f"filter({key})"
-        self._key = key
-        self._collection_fn = collection_fn
-        self._predicate = predicate
+    if errors:
+        return step_failure(
+            collapse_errors(
+                errors, f"map({key}): {len(errors)} item(s) failed"
+            ),
+            meta,
+            f"map({key})",
+        )
 
-    async def execute(self, ctx: dict[str, Any]) -> CombinatorResult:
-        items = self._collection_fn(ctx)
-        if inspect.isawaitable(items):
-            items = await items
+    return step_success({key: values}, meta)
 
-        items_list = list(items)
 
-        async def check_one(item: Any) -> bool:
-            result = self._predicate(item, ctx)
-            if inspect.isawaitable(result):
-                return bool(await result)
-            return bool(result)
+async def _map_step_form(
+    key: str,
+    inner_step: Step,
+    ctx: dict[str, Any],
+    items: list[object],
+    meta: StepMeta,
+) -> StepResult[dict[str, Any]]:
+    pre_ctx: dict[str, Any] = dict(ctx)
 
-        results = await asyncio.gather(*(check_one(item) for item in items_list))
-        filtered = [
-            item for item, keep in zip(items_list, results, strict=False) if keep
-        ]
+    async def run_one(
+        item: object,
+    ) -> tuple[dict[str, Any] | None, Exception | None]:
+        item_ctx: dict[str, Any]
+        if isinstance(item, dict):
+            item_ctx = {**ctx, **item}
+        elif isinstance(item, BaseModel):
+            item_ctx = {**ctx, **item.model_dump()}
+        else:
+            item_ctx = dict(ctx)
 
-        return CombinatorResult(output={self._key: filtered})
+        result = await inner_step.run(item_ctx)
+        if isinstance(result, StepFailure):
+            return None, result.error
+        return result.data, None
+
+    raw = await asyncio.gather(
+        *(run_one(item) for item in items),
+        return_exceptions=True,
+    )
+    settled, gather_errors = partition_settled(raw)
+
+    errors: list[Exception] = list(gather_errors)
+    succeeded: list[dict[str, Any]] = []
+    for item in cast(
+        list[tuple[dict[str, Any] | None, Exception | None]], settled
+    ):
+        output, err = item
+        if err is not None:
+            errors.append(err)
+        else:
+            assert output is not None
+            succeeded.append(output)
+
+    if errors:
+        for output in reversed(succeeded):
+            if inner_step.has_rollback:
+                with contextlib.suppress(Exception):
+                    await inner_step.run_rollback(pre_ctx, output)
+        return step_failure(
+            collapse_errors(
+                errors, f"map({key}): {len(errors)} item(s) failed"
+            ),
+            meta,
+            f"map({key})",
+        )
+
+    return step_success({key: succeeded}, meta)
+
+
+# ---------------------------------------------------------------------------
+# filter_step
+# ---------------------------------------------------------------------------
 
 
 def filter_step(
     key: str,
-    collection_fn: Callable[..., Any],
-    predicate: Callable[..., Any],
-) -> _FilterStep:
-    """Create a filter step that keeps items where predicate returns True.
+    collection_fn: Callable[[dict[str, Any]], Any],
+    predicate: Callable[[Any, dict[str, Any]], Any],
+) -> _FnStep:
+    """Keep items where predicate(item, ctx) returns True."""
+    step_name = f"filter({key})"
 
-    Predicate signature: predicate(item, ctx) -> bool.
-    Predicates run concurrently. Original order preserved. No rollback (pure).
-    Supports sync and async predicates.
-    """
-    return _FilterStep(key, collection_fn, predicate)
+    async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
+        ctx_dict = to_ctx_dict(ctx)
+        meta = step_meta(step_name, ctx_dict)
+
+        try:
+            items = collection_fn(ctx_dict)
+            if inspect.isawaitable(items):
+                items = await items
+            items_list: list[object] = list(items)
+
+            async def check_one(item: object) -> bool:
+                result = predicate(item, ctx_dict)
+                if inspect.isawaitable(result):
+                    return bool(await result)
+                return bool(result)
+
+            raw = await asyncio.gather(
+                *(check_one(item) for item in items_list),
+                return_exceptions=True,
+            )
+            values, errors = partition_settled(raw)
+
+            if errors:
+                return step_failure(
+                    collapse_errors(
+                        errors,
+                        f"{step_name}: {len(errors)} predicate(s) failed",
+                    ),
+                    meta,
+                    step_name,
+                )
+
+            keep_flags: list[bool] = [bool(v) for v in values]
+            filtered = [
+                item
+                for item, keep in zip(
+                    items_list, keep_flags, strict=True
+                )
+                if keep
+            ]
+        except Exception as e:
+            return step_failure(to_error(e), meta, step_name)
+
+        return step_success({key: filtered}, meta)
+
+    return _FnStep(name=step_name, run_fn=run_fn)
 
 
-class _FlatMapStep:
-    """Collection expansion — map each item to a list, flatten one level.
-
-    Function-only (no step form). Callbacks run concurrently. No rollback.
-    """
-
-    def __init__(
-        self,
-        key: str,
-        collection_fn: Callable[..., Any],
-        mapper: Callable[..., Any],
-    ) -> None:
-        self.name = f"flat_map({key})"
-        self._key = key
-        self._collection_fn = collection_fn
-        self._mapper = mapper
-
-    async def execute(self, ctx: dict[str, Any]) -> CombinatorResult:
-        items = self._collection_fn(ctx)
-        if inspect.isawaitable(items):
-            items = await items
-
-        async def run_one(item: Any) -> list[Any]:
-            result = self._mapper(item, ctx)
-            if inspect.isawaitable(result):
-                return list(await result)
-            return list(result)
-
-        results = await asyncio.gather(*(run_one(item) for item in items))
-        # Flatten one level
-        flattened = [x for sublist in results for x in sublist]
-
-        return CombinatorResult(output={self._key: flattened})
+# ---------------------------------------------------------------------------
+# flat_map
+# ---------------------------------------------------------------------------
 
 
 def flat_map(
     key: str,
-    collection_fn: Callable[..., Any],
-    mapper: Callable[..., Any],
-) -> _FlatMapStep:
-    """Create a flat_map step that maps each item to a list and flattens one level.
+    collection_fn: Callable[[dict[str, Any]], Any],
+    mapper: Callable[[Any, dict[str, Any]], Any],
+) -> _FnStep:
+    """Map each item to a list and flatten one level."""
+    step_name = f"flat_map({key})"
 
-    Function-only (no step form). Callbacks run concurrently. No rollback (pure).
-    """
-    return _FlatMapStep(key, collection_fn, mapper)
+    async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
+        ctx_dict = to_ctx_dict(ctx)
+        meta = step_meta(step_name, ctx_dict)
+
+        try:
+            items = collection_fn(ctx_dict)
+            if inspect.isawaitable(items):
+                items = await items
+
+            async def run_one(item: object) -> list[object]:
+                result = mapper(item, ctx_dict)
+                if inspect.isawaitable(result):
+                    return list(await result)
+                return list(result)
+
+            raw = await asyncio.gather(
+                *(run_one(item) for item in items),
+                return_exceptions=True,
+            )
+            values, errors = partition_settled(raw)
+
+            if errors:
+                return step_failure(
+                    collapse_errors(
+                        errors,
+                        f"{step_name}: {len(errors)} callback(s) failed",
+                    ),
+                    meta,
+                    step_name,
+                )
+
+            flattened: list[object] = [
+                x
+                for sublist in cast(list[list[object]], values)
+                for x in sublist
+            ]
+        except Exception as e:
+            return step_failure(to_error(e), meta, step_name)
+
+        return step_success({key: flattened}, meta)
+
+    return _FnStep(name=step_name, run_fn=run_fn)

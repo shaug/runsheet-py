@@ -89,8 +89,17 @@ class ChoiceNoMatchError(RunsheetError):
 
 
 class RollbackError(RunsheetError):
-    def __init__(self, message: str) -> None:
+    causes: tuple[Exception, ...]
+
+    def __init__(
+        self, message: str, causes: tuple[Exception, ...] = ()
+    ) -> None:
+        self.causes = causes
         super().__init__(RunsheetErrorCode.ROLLBACK, message)
+        if len(causes) == 1:
+            self.__cause__ = causes[0]
+        elif len(causes) > 1:
+            self.__cause__ = ExceptionGroup(message, list(causes))
 
 
 class UnknownError(RunsheetError):

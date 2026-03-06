@@ -1,5 +1,7 @@
 """Tests for step decorator and Step class."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from runsheet import RetryPolicy, Step, step
@@ -29,17 +31,18 @@ class TestStepDecorator:
         def double(ctx: Input) -> Output:
             return Output(result=ctx.value * 2)
 
-        result = await double.run(Input(value=5))
-        assert isinstance(result, Output)
-        assert result.result == 10
+        result = await double.run({"value": 5})
+        assert result.success is True
+        assert result.data["result"] == 10
 
     async def test_async_step_run(self) -> None:
         @step(requires=Input, provides=Output)
         async def double(ctx: Input) -> Output:
             return Output(result=ctx.value * 2)
 
-        result = await double.run(Input(value=5))
-        assert result.result == 10
+        result = await double.run({"value": 5})
+        assert result.success is True
+        assert result.data["result"] == 10
 
     def test_name_override(self) -> None:
         @step(name="custom_name", provides=Output)
@@ -56,6 +59,48 @@ class TestStepDecorator:
         assert compute.name == "compute"
 
 
+class TestStepRunReturnsStepResult:
+    async def test_success_returns_step_success(self) -> None:
+        @step(requires=Input, provides=Output)
+        async def double(ctx: Input) -> Output:
+            return Output(result=ctx.value * 2)
+
+        result = await double.run({"value": 5})
+        assert result.success is True
+        assert result.data == {"result": 10}
+        assert result.meta.name == "double"
+
+    async def test_failure_returns_step_failure(self) -> None:
+        @step(requires=Input, provides=Output)
+        async def failing(ctx: Input) -> Output:
+            raise RuntimeError("boom")
+
+        result = await failing.run({"value": 5})
+        assert result.success is False
+        assert isinstance(result.error, RuntimeError)
+        assert result.failed_step == "failing"
+
+    async def test_requires_validation_failure(self) -> None:
+        @step(requires=Input, provides=Output)
+        async def needs_input(ctx: Input) -> Output:
+            return Output(result=ctx.value)
+
+        result = await needs_input.run({"wrong": "data"})
+        assert result.success is False
+        from runsheet import RequiresValidationError
+        assert isinstance(result.error, RequiresValidationError)
+
+    async def test_provides_validation_failure(self) -> None:
+        @step(provides=Output)
+        async def bad_output(ctx: dict[str, Any]) -> dict[str, Any]:
+            return {"wrong": "field"}
+
+        result = await bad_output.run({})
+        assert result.success is False
+        from runsheet import ProvidesValidationError
+        assert isinstance(result.error, ProvidesValidationError)
+
+
 class TestRollback:
     async def test_rollback_decorator(self) -> None:
         @step(requires=Input, provides=Output)
@@ -69,6 +114,7 @@ class TestRollback:
             nonlocal rollback_called
             rollback_called = True
 
+        _ = undo_charge  # registered via decorator
         assert charge.has_rollback is True
         await charge.run_rollback(Input(value=1), Output(result=1))
         assert rollback_called
@@ -93,6 +139,7 @@ class TestRollback:
             nonlocal rollback_called
             rollback_called = True
 
+        _ = undo_charge  # registered via decorator
         await charge.run_rollback(Input(value=1), Output(result=1))
         assert rollback_called
 

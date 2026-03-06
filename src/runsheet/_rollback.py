@@ -8,34 +8,35 @@ execute. All rollback errors are collected, never swallowed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
-from runsheet._result import RollbackFailure, RollbackReport
-from runsheet._step import Step
+from runsheet._result import RollbackCallback, RollbackFailure, RollbackReport
 
 
 @dataclass(frozen=True)
 class ExecutedStep:
-    """Tracks a step that was executed, for rollback purposes."""
+    """Tracks a step that was executed, for rollback purposes.
 
-    step: Step
-    pre_ctx: dict[str, Any]
-    output: dict[str, Any]
+    The rollback callback captures the pre-step context and output at
+    creation time, making it safe for concurrent/reentrant pipelines.
+    """
+
+    name: str
+    rollback: RollbackCallback | None = None
 
 
 async def do_rollback(executed: list[ExecutedStep]) -> RollbackReport:
-    """Execute rollback handlers in reverse order. Best-effort."""
+    """Execute rollback callbacks in reverse order. Best-effort."""
     completed: list[str] = []
     failed: list[RollbackFailure] = []
 
     for entry in reversed(executed):
-        if not entry.step.has_rollback:
+        if entry.rollback is None:
             continue
         try:
-            await entry.step.run_rollback(entry.pre_ctx, entry.output)
-            completed.append(entry.step.name)
+            await entry.rollback()
+            completed.append(entry.name)
         except Exception as e:
-            failed.append(RollbackFailure(step=entry.step.name, error=e))
+            failed.append(RollbackFailure(step=entry.name, error=e))
 
     return RollbackReport(
         completed=tuple(completed),

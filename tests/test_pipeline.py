@@ -1,14 +1,15 @@
 """Tests for Pipeline class and execution engine."""
 
 import asyncio
+from typing import Any
 
 from pydantic import BaseModel
 
 from runsheet import (
+    AggregateFailure,
+    AggregateSuccess,
     ArgsValidationError,
     Pipeline,
-    PipelineFailure,
-    PipelineSuccess,
     ProvidesValidationError,
     RequiresValidationError,
     RetryExhaustedError,
@@ -62,12 +63,12 @@ class TestPipelineBasic:
         )
 
         result = await pipeline.run(OrderInput(order_id="123", amount=50.0))
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.success is True
         assert result.data["validated"] is True
         assert result.data["charge_id"] == "ch_123"
         assert result.data["email_sent"] is True
-        assert result.meta.pipeline == "checkout"
+        assert result.meta.name == "checkout"
         assert result.meta.steps_executed == (
             "validate_order",
             "charge_payment",
@@ -86,9 +87,9 @@ class TestPipelineBasic:
         )
 
         result = await pipeline.run(OrderInput(order_id="1", amount=10.0))
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert result.success is False
-        assert isinstance(result.errors[0], RuntimeError)
+        assert isinstance(result.error, RuntimeError)
 
     async def test_args_persist_through_pipeline(self) -> None:
         """Initial args flow through the entire pipeline."""
@@ -99,8 +100,7 @@ class TestPipelineBasic:
         )
 
         result = await pipeline.run(OrderInput(order_id="456", amount=99.0))
-        assert isinstance(result, PipelineSuccess)
-        # Args should still be in context
+        assert isinstance(result, AggregateSuccess)
         assert result.data["order_id"] == "456"
         assert result.data["amount"] == 99.0
 
@@ -117,14 +117,14 @@ class TestPipelineBasic:
 
         pipeline = Pipeline(name="test", steps=[step_a, step_b])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["validated"] is True
         assert result.data["charge_id"] == "ch_1"
 
     async def test_empty_pipeline(self) -> None:
         pipeline = Pipeline(name="empty", steps=[])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
 
     async def test_no_args(self) -> None:
         @step(provides=ValidatedOrder)
@@ -133,7 +133,7 @@ class TestPipelineBasic:
 
         pipeline = Pipeline(name="test", steps=[simple])
         result = await pipeline.run()
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
 
 
 class TestArgsValidation:
@@ -145,8 +145,8 @@ class TestArgsValidation:
         )
 
         result = await pipeline.run({"bad": "data"})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], ArgsValidationError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, ArgsValidationError)
         assert result.failed_step == "<args>"
 
 
@@ -160,8 +160,8 @@ class TestRequiresValidation:
 
         pipeline = Pipeline(name="test", steps=[needs_order])
         result = await pipeline.run({"wrong_field": "data"})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], RequiresValidationError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, RequiresValidationError)
 
 
 class TestProvidesValidation:
@@ -169,13 +169,13 @@ class TestProvidesValidation:
         """Step fails if output doesn't match provides schema."""
 
         @step(provides=ChargeOutput)
-        async def bad_output(ctx: dict) -> dict:  # type: ignore[type-arg]
+        async def bad_output(ctx: dict[str, Any]) -> dict[str, Any]:
             return {"wrong_field": "data"}
 
         pipeline = Pipeline(name="test", steps=[bad_output])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], ProvidesValidationError)
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, ProvidesValidationError)
 
 
 class TestRollback:
@@ -205,7 +205,7 @@ class TestRollback:
         pipeline = Pipeline(name="test", steps=[step_a, step_b, step_c])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
+        assert isinstance(result, AggregateFailure)
         assert result.failed_step == "step_c"
         # Rollback in reverse order: b, a
         assert rollback_log == ["b", "a"]
@@ -240,8 +240,7 @@ class TestRollback:
         pipeline = Pipeline(name="test", steps=[step_a, step_b, step_c])
         result = await pipeline.run({})
 
-        assert isinstance(result, PipelineFailure)
-        # Even though step_b rollback failed, step_a rollback still ran
+        assert isinstance(result, AggregateFailure)
         assert rollback_a_called
         assert len(result.rollback.failed) == 1
         assert result.rollback.failed[0].step == "step_b"
@@ -264,7 +263,7 @@ class TestRetry:
 
         pipeline = Pipeline(name="test", steps=[flaky])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert call_count == 3
 
     async def test_retry_exhausted(self) -> None:
@@ -277,9 +276,9 @@ class TestRetry:
 
         pipeline = Pipeline(name="test", steps=[always_fails])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], RetryExhaustedError)
-        assert result.errors[0].attempts == 3
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, RetryExhaustedError)
+        assert result.error.attempts == 3
 
     async def test_retry_if_predicate(self) -> None:
         call_count = 0
@@ -301,8 +300,7 @@ class TestRetry:
 
         pipeline = Pipeline(name="test", steps=[selective])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        # Should have stopped retrying after "permanent" error
+        assert isinstance(result, AggregateFailure)
         assert call_count == 2
 
 
@@ -315,9 +313,9 @@ class TestTimeout:
 
         pipeline = Pipeline(name="test", steps=[slow])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        assert isinstance(result.errors[0], TimeoutError)
-        assert result.errors[0].timeout_seconds == 0.05
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, TimeoutError)
+        assert result.error.timeout_seconds == 0.05
 
     async def test_timeout_per_retry_attempt(self) -> None:
         call_count = 0
@@ -335,8 +333,7 @@ class TestTimeout:
 
         pipeline = Pipeline(name="test", steps=[slow_retry])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineFailure)
-        # Both attempts should have timed out
+        assert isinstance(result, AggregateFailure)
         assert call_count == 2
 
 
@@ -368,8 +365,7 @@ class TestStrictMode:
 
         pipeline = Pipeline(name="test", steps=[step_a, step_b], strict=False)
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
-        # Last writer wins
+        assert isinstance(result, AggregateSuccess)
         assert result.data["charge_id"] == "b"
 
 
@@ -381,5 +377,93 @@ class TestSyncSteps:
 
         pipeline = Pipeline(name="test", steps=[sync_step])
         result = await pipeline.run({})
-        assert isinstance(result, PipelineSuccess)
+        assert isinstance(result, AggregateSuccess)
         assert result.data["validated"] is True
+
+
+class TestPipelineComposition:
+    """Pipeline IS a step — it can be used in another pipeline's steps."""
+
+    async def test_nested_pipeline_success(self) -> None:
+        """Inner pipeline's outputs merge into outer context."""
+
+        @step(provides=ValidatedOrder)
+        async def step_a(ctx: dict) -> ValidatedOrder:  # type: ignore[type-arg]
+            return ValidatedOrder(validated=True)
+
+        @step(provides=ChargeOutput)
+        async def step_b(ctx: dict) -> ChargeOutput:  # type: ignore[type-arg]
+            return ChargeOutput(charge_id="ch_1")
+
+        inner = Pipeline(name="inner", steps=[step_a, step_b])
+
+        @step(provides=EmailOutput)
+        async def step_c(ctx: dict[str, Any]) -> EmailOutput:
+            assert ctx.get("validated") is True
+            assert ctx.get("charge_id") == "ch_1"
+            return EmailOutput(email_sent=True)
+
+        outer = Pipeline(
+            name="outer",
+            steps=[inner, step_c],  # type: ignore[list-item]
+        )
+        result = await outer.run({})
+        assert isinstance(result, AggregateSuccess)
+        assert result.data["validated"] is True
+        assert result.data["charge_id"] == "ch_1"
+        assert result.data["email_sent"] is True
+
+    async def test_nested_pipeline_rollback(self) -> None:
+        """Outer step failure rolls back inner pipeline's steps."""
+        rollback_log: list[str] = []
+
+        @step(provides=ValidatedOrder)
+        async def step_a(ctx: dict) -> ValidatedOrder:  # type: ignore[type-arg]
+            return ValidatedOrder(validated=True)
+
+        @step_a.rollback
+        async def undo_a(ctx: dict, output: dict) -> None:  # type: ignore[type-arg]
+            rollback_log.append("a")
+
+        @step(provides=ChargeOutput)
+        async def step_b(ctx: dict) -> ChargeOutput:  # type: ignore[type-arg]
+            return ChargeOutput(charge_id="ch_1")
+
+        @step_b.rollback
+        async def undo_b(ctx: dict, output: dict) -> None:  # type: ignore[type-arg]
+            rollback_log.append("b")
+
+        inner = Pipeline(name="inner", steps=[step_a, step_b])
+
+        @step(provides=EmailOutput)
+        async def failing_step(ctx: dict) -> EmailOutput:  # type: ignore[type-arg]
+            raise RuntimeError("outer step failed")
+
+        outer = Pipeline(
+            name="outer",
+            steps=[inner, failing_step],  # type: ignore[list-item]
+        )
+        result = await outer.run({})
+        assert isinstance(result, AggregateFailure)
+        assert "b" in rollback_log
+        assert "a" in rollback_log
+
+    async def test_inner_pipeline_failure_propagates(self) -> None:
+        """If inner pipeline fails, outer pipeline stops."""
+
+        @step(provides=ValidatedOrder)
+        async def step_a(ctx: dict) -> ValidatedOrder:  # type: ignore[type-arg]
+            raise RuntimeError("inner failure")
+
+        inner = Pipeline(name="inner", steps=[step_a])
+
+        @step(provides=EmailOutput)
+        async def step_b(ctx: dict) -> EmailOutput:  # type: ignore[type-arg]
+            return EmailOutput(email_sent=True)
+
+        outer = Pipeline(
+            name="outer",
+            steps=[inner, step_b],  # type: ignore[list-item]
+        )
+        result = await outer.run({})
+        assert isinstance(result, AggregateFailure)
