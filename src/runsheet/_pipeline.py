@@ -101,7 +101,8 @@ class Pipeline:
                     seen[field_name] = step_name
 
     async def run(
-        self, ctx: object = None,
+        self,
+        ctx: object = None,
     ) -> StepResult[dict[str, Any]]:
         """Execute the pipeline. Never raises — always returns StepResult."""
         self._captured_state = None
@@ -153,9 +154,7 @@ class Pipeline:
             # Track and accumulate
             output: dict[str, Any] = dict(result.data)
             rollback_cb = pipeline_step.make_rollback(pre_ctx, output)
-            executed.append(
-                ExecutedStep(name=pipeline_step.name, rollback=rollback_cb)
-            )
+            executed.append(ExecutedStep(name=pipeline_step.name, rollback=rollback_cb))
             steps_executed.append(pipeline_step.name)
             ctx_dict = {**ctx_dict, **output}
 

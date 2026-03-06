@@ -49,7 +49,8 @@ class TestPipelineReentrancy:
 
         @slow_step.rollback
         async def undo_slow(  # pyright: ignore[reportUnusedFunction]
-            ctx: dict[str, Any], output: dict[str, Any],
+            ctx: dict[str, Any],
+            output: dict[str, Any],
         ) -> None:
             log.append(f"rollback-{output.get('a')}")
 
@@ -80,7 +81,8 @@ class TestPipelineReentrancy:
 
         @step_a.rollback
         async def undo_a(  # pyright: ignore[reportUnusedFunction]
-            ctx: dict[str, Any], output: dict[str, Any],
+            ctx: dict[str, Any],
+            output: dict[str, Any],
         ) -> None:
             log.append("rollback-a")
 
@@ -172,9 +174,7 @@ class TestAggregateMetadata:
         async def step_b(ctx: dict) -> OutputB:  # type: ignore[type-arg]
             return OutputB(b="b")
 
-        pipeline = Pipeline(
-            name="test", steps=[parallel(step_a, step_b)]
-        )
+        pipeline = Pipeline(name="test", steps=[parallel(step_a, step_b)])
         result = await pipeline.run({})
 
         assert isinstance(result, AggregateSuccess)
@@ -193,9 +193,7 @@ class TestAggregateMetadata:
         async def step_b(ctx: dict) -> OutputB:  # type: ignore[type-arg]
             raise RuntimeError("fail")
 
-        pipeline = Pipeline(
-            name="test", steps=[parallel(step_a, step_b)]
-        )
+        pipeline = Pipeline(name="test", steps=[parallel(step_a, step_b)])
         result = await pipeline.run({})
 
         assert isinstance(result, AggregateFailure)
@@ -271,7 +269,8 @@ class TestCoverage:
 
         @step_a.rollback
         async def undo_a(  # pyright: ignore[reportUnusedFunction]
-            ctx: dict[str, Any], output: dict[str, Any],
+            ctx: dict[str, Any],
+            output: dict[str, Any],
         ) -> None:
             raise RuntimeError("undo failed")
 

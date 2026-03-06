@@ -102,8 +102,7 @@ class Step:
             except ValidationError as e:
                 return step_failure(
                     RequiresValidationError(
-                        f"Step '{self.name}' requires "
-                        f"validation failed: {e}"
+                        f"Step '{self.name}' requires validation failed: {e}"
                     ),
                     meta,
                     self.name,
@@ -227,9 +226,7 @@ class Step:
 # ---------------------------------------------------------------------------
 
 # Type for the make_rollback callback that combinators can provide
-MakeRollbackFn = Callable[
-    [dict[str, Any], dict[str, Any]], RollbackCallback | None
-]
+MakeRollbackFn = Callable[[dict[str, Any], dict[str, Any]], RollbackCallback | None]
 
 
 class _FnStep:  # pyright: ignore[reportUnusedClass]

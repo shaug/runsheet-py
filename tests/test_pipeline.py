@@ -406,7 +406,8 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, step_c],          )
+            steps=[inner, step_c],
+        )
         result = await outer.run({})
         assert isinstance(result, AggregateSuccess)
         assert result.data["validated"] is True
@@ -441,7 +442,8 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, failing_step],          )
+            steps=[inner, failing_step],
+        )
         result = await outer.run({})
         assert isinstance(result, AggregateFailure)
         assert "b" in rollback_log
@@ -462,6 +464,7 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, step_b],          )
+            steps=[inner, step_b],
+        )
         result = await outer.run({})
         assert isinstance(result, AggregateFailure)

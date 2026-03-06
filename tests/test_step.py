@@ -88,6 +88,7 @@ class TestStepRunReturnsStepResult:
         result = await needs_input.run({"wrong": "data"})
         assert result.success is False
         from runsheet import RequiresValidationError
+
         assert isinstance(result.error, RequiresValidationError)
 
     async def test_provides_validation_failure(self) -> None:
@@ -98,6 +99,7 @@ class TestStepRunReturnsStepResult:
         result = await bad_output.run({})
         assert result.success is False
         from runsheet import ProvidesValidationError
+
         assert isinstance(result.error, ProvidesValidationError)
 
 

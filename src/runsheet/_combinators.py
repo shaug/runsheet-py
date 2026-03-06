@@ -55,9 +55,7 @@ def when(
         except Exception as e:
             cause = to_error(e)
             inner = inner_step.name
-            error = PredicateError(
-                f"Predicate for '{inner}' raised: {cause}"
-            )
+            error = PredicateError(f"Predicate for '{inner}' raised: {cause}")
             error.__cause__ = cause
             return step_failure(error, meta, step_name)
 
@@ -227,8 +225,7 @@ def choice(
             except Exception as e:
                 cause = to_error(e)
                 error = PredicateError(
-                    f"Choice predicate for "
-                    f"'{inner_step.name}' raised: {cause}"
+                    f"Choice predicate for '{inner_step.name}' raised: {cause}"
                 )
                 error.__cause__ = cause
                 meta = aggregate_meta(step_name, ctx_dict, ())
@@ -237,14 +234,10 @@ def choice(
             if should_run:
                 result = await inner_step.run(ctx)
                 if isinstance(result, StepFailure):
-                    meta = aggregate_meta(
-                        step_name, ctx_dict, (inner_step.name,)
-                    )
+                    meta = aggregate_meta(step_name, ctx_dict, (inner_step.name,))
                     return step_failure(result.error, meta, step_name)
                 _last_matched[0] = inner_step
-                meta = aggregate_meta(
-                    step_name, ctx_dict, (inner_step.name,)
-                )
+                meta = aggregate_meta(step_name, ctx_dict, (inner_step.name,))
                 return step_success(result.data, meta)
 
         meta = aggregate_meta(step_name, ctx_dict, ())

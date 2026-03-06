@@ -53,12 +53,8 @@ def map_step(
             return step_failure(to_error(e), meta, step_name)
 
         if isinstance(mapper, Step):
-            return await _map_step_form(
-                key, mapper, ctx_dict, items_list, meta
-            )
-        return await _map_fn_form(
-            key, mapper, ctx_dict, items_list, meta
-        )
+            return await _map_step_form(key, mapper, ctx_dict, items_list, meta)
+        return await _map_fn_form(key, mapper, ctx_dict, items_list, meta)
 
     return _FnStep(name=step_name, run_fn=run_fn)
 
@@ -84,9 +80,7 @@ async def _map_fn_form(
 
     if errors:
         return step_failure(
-            collapse_errors(
-                errors, f"map({key}): {len(errors)} item(s) failed"
-            ),
+            collapse_errors(errors, f"map({key}): {len(errors)} item(s) failed"),
             meta,
             f"map({key})",
         )
@@ -127,9 +121,7 @@ async def _map_step_form(
 
     errors: list[Exception] = list(gather_errors)
     succeeded: list[dict[str, Any]] = []
-    for item in cast(
-        list[tuple[dict[str, Any] | None, Exception | None]], settled
-    ):
+    for item in cast(list[tuple[dict[str, Any] | None, Exception | None]], settled):
         output, err = item
         if err is not None:
             errors.append(err)
@@ -143,9 +135,7 @@ async def _map_step_form(
                 with contextlib.suppress(Exception):
                     await inner_step.run_rollback(pre_ctx, output)
         return step_failure(
-            collapse_errors(
-                errors, f"map({key}): {len(errors)} item(s) failed"
-            ),
+            collapse_errors(errors, f"map({key}): {len(errors)} item(s) failed"),
             meta,
             f"map({key})",
         )
@@ -200,11 +190,7 @@ def filter_step(
 
             keep_flags: list[bool] = [bool(v) for v in values]
             filtered = [
-                item
-                for item, keep in zip(
-                    items_list, keep_flags, strict=True
-                )
-                if keep
+                item for item, keep in zip(items_list, keep_flags, strict=True) if keep
             ]
         except Exception as e:
             return step_failure(to_error(e), meta, step_name)
@@ -259,9 +245,7 @@ def flat_map(
                 )
 
             flattened: list[object] = [
-                x
-                for sublist in cast(list[list[object]], values)
-                for x in sublist
+                x for sublist in cast(list[list[object]], values) for x in sublist
             ]
         except Exception as e:
             return step_failure(to_error(e), meta, step_name)
