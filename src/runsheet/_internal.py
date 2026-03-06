@@ -10,6 +10,8 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, TypeVar, cast
 
+from pydantic import BaseModel
+
 from runsheet._errors import UnknownError
 from runsheet._result import (
     EMPTY_ROLLBACK,
@@ -59,12 +61,9 @@ def to_ctx_dict(ctx: object) -> dict[str, Any]:
     """Normalize ctx to dict[str, Any]."""
     if isinstance(ctx, dict):
         return cast(dict[str, Any], ctx)
+    if isinstance(ctx, BaseModel):
+        return ctx.model_dump()
     return {}
-
-
-def freeze_context(ctx: dict[str, Any]) -> MappingProxyType[str, Any]:
-    """Create a read-only view of the context dict."""
-    return MappingProxyType(ctx)
 
 
 def partition_settled(

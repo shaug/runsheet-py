@@ -3,10 +3,12 @@
 import asyncio
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from runsheet import (
     AggregateFailure,
+    AggregateMeta,
     AggregateSuccess,
     ArgsValidationError,
     Pipeline,
@@ -69,6 +71,7 @@ class TestPipelineBasic:
         assert result.data["charge_id"] == "ch_123"
         assert result.data["email_sent"] is True
         assert result.meta.name == "checkout"
+        assert isinstance(result.meta, AggregateMeta)
         assert result.meta.steps_executed == (
             "validate_order",
             "charge_payment",
@@ -347,12 +350,10 @@ class TestStrictMode:
         async def step_b(ctx: dict) -> ChargeOutput:  # type: ignore[type-arg]
             return ChargeOutput(charge_id="b")
 
-        try:
+        with pytest.raises(StrictOverlapError) as exc_info:
             Pipeline(name="test", steps=[step_a, step_b], strict=True)
-            raise AssertionError("Should have raised")
-        except StrictOverlapError as e:
-            assert e.key == "charge_id"
-            assert e.steps == ("step_a", "step_b")
+        assert exc_info.value.key == "charge_id"
+        assert exc_info.value.steps == ("step_a", "step_b")
 
     async def test_non_strict_allows_overlap(self) -> None:
         @step(provides=ChargeOutput)
@@ -405,8 +406,7 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, step_c],  # type: ignore[list-item]
-        )
+            steps=[inner, step_c],          )
         result = await outer.run({})
         assert isinstance(result, AggregateSuccess)
         assert result.data["validated"] is True
@@ -441,8 +441,7 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, failing_step],  # type: ignore[list-item]
-        )
+            steps=[inner, failing_step],          )
         result = await outer.run({})
         assert isinstance(result, AggregateFailure)
         assert "b" in rollback_log
@@ -463,7 +462,6 @@ class TestPipelineComposition:
 
         outer = Pipeline(
             name="outer",
-            steps=[inner, step_b],  # type: ignore[list-item]
-        )
+            steps=[inner, step_b],          )
         result = await outer.run({})
         assert isinstance(result, AggregateFailure)

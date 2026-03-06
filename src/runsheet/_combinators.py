@@ -33,69 +33,56 @@ from runsheet._step import Step, _FnStep
 # ---------------------------------------------------------------------------
 
 
-class _ConditionalStep(Step):
-    """Step wrapper that evaluates a predicate before running.
+def when(
+    predicate: Callable[[dict[str, Any]], object],
+    inner_step: Step,
+) -> _FnStep:
+    """Conditional step — only runs when predicate returns True."""
+    step_name = f"when({inner_step.name})"
 
-    Pipeline treats _ConditionalStep like any other Runnable — no special-casing.
-    When the predicate is False, run() returns an empty StepSuccess and
-    make_rollback() returns None (the skipped step does not participate in
-    rollback).
-    """
+    # Per-call-site state: whether the inner step ran.
+    # make_rb atomically consumes this — safe because Pipeline calls
+    # run() then make_rollback() with no await in between.
+    _ran: list[bool] = [False]
 
-    def __init__(
-        self,
-        predicate: Callable[[dict[str, Any]], object],
-        inner_step: Step,
-    ) -> None:
-        super().__init__(
-            name=f"when({inner_step.name})",
-            requires=inner_step.requires,
-            provides=inner_step.provides,
-            run_fn=lambda _: None,  # type: ignore[arg-type]
-        )
-        self.predicate = predicate
-        self.inner_step = inner_step
-        self._skipped = True
-        if inner_step.has_rollback:
-            self._rollback_fn = inner_step._rollback_fn
-            self._rollback_is_async = inner_step._rollback_is_async
-
-    async def run(self, ctx: object) -> StepResult[dict[str, Any]]:
-        self._skipped = True
+    async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
+        _ran[0] = False
         ctx_dict = to_ctx_dict(ctx)
-        meta = step_meta(self.name, ctx_dict)
+        meta = step_meta(step_name, ctx_dict)
 
         try:
-            should_run = await call_predicate(self.predicate, ctx_dict)
+            should_run = await call_predicate(predicate, ctx_dict)
         except Exception as e:
             cause = to_error(e)
-            inner = self.inner_step.name
+            inner = inner_step.name
             error = PredicateError(
                 f"Predicate for '{inner}' raised: {cause}"
             )
             error.__cause__ = cause
-            return step_failure(error, meta, self.name)
+            return step_failure(error, meta, step_name)
 
         if not should_run:
             return step_success({}, meta)
 
-        self._skipped = False
-        return await self.inner_step.run(ctx)
+        _ran[0] = True
+        return await inner_step.run(ctx)
 
-    def make_rollback(
-        self, pre_ctx: dict[str, Any], output: dict[str, Any]
+    def make_rb(
+        pre_ctx: dict[str, Any], output: dict[str, Any]
     ) -> RollbackCallback | None:
-        if self._skipped:
+        ran = _ran[0]
+        _ran[0] = False
+        if not ran:
             return None
-        return super().make_rollback(pre_ctx, output)
+        return inner_step.make_rollback(pre_ctx, output)
 
-
-def when(
-    predicate: Callable[[dict[str, Any]], object],
-    inner_step: Step,
-) -> _ConditionalStep:
-    """Conditional step — only runs when predicate returns True."""
-    return _ConditionalStep(predicate, inner_step)
+    return _FnStep(
+        name=step_name,
+        run_fn=run_fn,
+        make_rollback_fn=make_rb,
+        requires=inner_step.requires,
+        provides=inner_step.provides,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +102,9 @@ def parallel(*steps: Step) -> _FnStep:
     step_name = f"parallel({names})"
     inner_steps = steps
 
-    # Mutable state captured by make_rollback immediately after run.
+    # Per-call-site state captured by make_rollback immediately after run.
+    # Safe because Pipeline calls run() then make_rollback() with no await
+    # in between (asyncio cooperative scheduling guarantees no interleaving).
     _last_succeeded: list[tuple[Step, dict[str, Any]]] = []
 
     async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
@@ -217,28 +206,22 @@ def choice(
     """
     step_name = "choice"
 
-    # Mutable state captured by make_rollback immediately after run.
+    # Normalize bare Step to (always-true predicate, step) tuples
+    normalized: list[tuple[Callable[[dict[str, Any]], object], Step]] = []
+    for b in branches:
+        if isinstance(b, tuple):
+            normalized.append(b)
+        else:
+            normalized.append((lambda _: True, b))
+
+    # Per-call-site state captured by make_rollback immediately after run.
     _last_matched: list[Step | None] = [None]
 
     async def run_fn(ctx: object) -> StepResult[dict[str, Any]]:
         ctx_dict = to_ctx_dict(ctx)
         _last_matched[0] = None
 
-        for branch in branches:
-            if isinstance(branch, Step):
-                result = await branch.run(ctx)
-                if isinstance(result, StepFailure):
-                    meta = aggregate_meta(
-                        step_name, ctx_dict, (branch.name,)
-                    )
-                    return step_failure(result.error, meta, step_name)
-                _last_matched[0] = branch
-                meta = aggregate_meta(
-                    step_name, ctx_dict, (branch.name,)
-                )
-                return step_success(result.data, meta)
-
-            predicate, inner_step = branch
+        for predicate, inner_step in normalized:
             try:
                 should_run = await call_predicate(predicate, ctx_dict)
             except Exception as e:

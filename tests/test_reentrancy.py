@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from runsheet import (
@@ -15,6 +16,8 @@ from runsheet import (
     parallel,
     step,
 )
+from runsheet._internal import collapse_errors, partition_settled, to_ctx_dict, to_error
+from runsheet._step import _FnStep
 
 
 class OutputA(BaseModel):
@@ -40,16 +43,18 @@ class TestPipelineReentrancy:
         log: list[str] = []
 
         @step(provides=OutputA)
-        async def slow_step(ctx: dict) -> OutputA:  # type: ignore[type-arg]
+        async def slow_step(ctx: dict[str, Any]) -> OutputA:
             await asyncio.sleep(0.02)
             return OutputA(a=ctx.get("id", "?"))
 
         @slow_step.rollback
-        async def undo_slow(ctx: dict[str, Any], output: dict[str, Any]) -> None:
+        async def undo_slow(  # pyright: ignore[reportUnusedFunction]
+            ctx: dict[str, Any], output: dict[str, Any],
+        ) -> None:
             log.append(f"rollback-{output.get('a')}")
 
         @step(provides=OutputB)
-        async def fail_step(ctx: dict) -> OutputB:  # type: ignore[type-arg]
+        async def fail_step(ctx: dict[str, Any]) -> OutputB:
             raise RuntimeError("boom")
 
         pipeline = Pipeline(name="reentrant", steps=[slow_step, fail_step])
@@ -70,15 +75,17 @@ class TestPipelineReentrancy:
         log: list[str] = []
 
         @step(provides=OutputA)
-        async def step_a(ctx: dict) -> OutputA:  # type: ignore[type-arg]
+        async def step_a(ctx: dict[str, Any]) -> OutputA:
             return OutputA(a="a")
 
         @step_a.rollback
-        async def undo_a(ctx: dict[str, Any], output: dict[str, Any]) -> None:
+        async def undo_a(  # pyright: ignore[reportUnusedFunction]
+            ctx: dict[str, Any], output: dict[str, Any],
+        ) -> None:
             log.append("rollback-a")
 
         @step(provides=OutputB)
-        async def step_b(ctx: dict) -> OutputB:  # type: ignore[type-arg]
+        async def step_b(ctx: dict[str, Any]) -> OutputB:
             if ctx.get("fail"):
                 raise RuntimeError("fail")
             return OutputB(b="b")
@@ -115,8 +122,9 @@ class TestRollbackErrorChaining:
         c2 = ValueError("second")
         err = RollbackError("rollback failed", causes=(c1, c2))
         assert err.causes == (c1, c2)
-        assert isinstance(err.__cause__, ExceptionGroup)
-        assert list(err.__cause__.exceptions) == [c1, c2]
+        cause = err.__cause__
+        assert isinstance(cause, ExceptionGroup)
+        assert list(cause.exceptions) == [c1, c2]  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
 
     async def test_no_causes_no_chaining(self) -> None:
         """RollbackError with no causes has no __cause__."""
@@ -238,3 +246,78 @@ class TestAggregateMetadata:
         assert isinstance(result, AggregateSuccess)
         assert isinstance(result.meta, AggregateMeta)
         assert result.meta.steps_executed == ("step_a", "step_b")
+
+
+# ---------------------------------------------------------------------------
+# Coverage: repr, edge cases, internal utilities
+# ---------------------------------------------------------------------------
+
+
+class TestCoverage:
+    def test_pipeline_repr(self) -> None:
+        pipeline = Pipeline(name="my_pipe", steps=[])
+        assert repr(pipeline) == "Pipeline(name='my_pipe', steps=0)"
+
+    def test_pipeline_has_rollback(self) -> None:
+        pipeline = Pipeline(name="test", steps=[])
+        assert pipeline.has_rollback is True
+
+    async def test_pipeline_run_rollback_with_failures(self) -> None:
+        """Pipeline.run_rollback raises RollbackError when inner rollbacks fail."""
+
+        @step(provides=OutputA)
+        async def step_a(ctx: dict) -> OutputA:  # type: ignore[type-arg]
+            return OutputA(a="a")
+
+        @step_a.rollback
+        async def undo_a(  # pyright: ignore[reportUnusedFunction]
+            ctx: dict[str, Any], output: dict[str, Any],
+        ) -> None:
+            raise RuntimeError("undo failed")
+
+        @step(provides=OutputB)
+        async def step_b(ctx: dict) -> OutputB:  # type: ignore[type-arg]
+            return OutputB(b="b")
+
+        # Build a pipeline, run it to populate _captured_state
+        inner = Pipeline(name="inner", steps=[step_a, step_b])
+        result = await inner.run({})
+        assert isinstance(result, AggregateSuccess)
+
+        # Now call run_rollback directly — the failing rollback should raise
+        with pytest.raises(RollbackError):
+            await inner.run_rollback()
+
+    def test_fn_step_repr(self) -> None:
+        async def dummy(ctx: object) -> None:
+            pass
+
+        fs = _FnStep(name="test_fn", run_fn=dummy)
+        assert repr(fs) == "_FnStep(name='test_fn')"
+
+    def test_to_error_non_exception(self) -> None:
+        err = to_error("not an exception")  # type: ignore[arg-type]
+        assert isinstance(err, Exception)
+        assert "not an exception" in str(err)
+
+    def test_collapse_errors_empty_list(self) -> None:
+        with pytest.raises(ValueError, match="at least one error"):
+            collapse_errors([], "should fail")
+
+    def test_partition_settled_base_exception(self) -> None:
+        """BaseException that's not Exception gets wrapped via to_error."""
+        results: list[object] = [KeyboardInterrupt("stop"), "ok"]
+        values, errors = partition_settled(results)
+        assert values == ["ok"]
+        assert len(errors) == 1
+        assert isinstance(errors[0], Exception)
+
+    def test_to_ctx_dict_with_base_model(self) -> None:
+        """to_ctx_dict handles BaseModel instances."""
+
+        class MyModel(BaseModel):
+            x: int = 1
+            y: str = "hello"
+
+        result = to_ctx_dict(MyModel())
+        assert result == {"x": 1, "y": "hello"}

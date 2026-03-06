@@ -2,6 +2,8 @@
 
 from types import MappingProxyType
 
+import pytest
+
 from runsheet import (
     EMPTY_ROLLBACK,
     AggregateFailure,
@@ -73,11 +75,8 @@ class TestStepSuccess:
     def test_frozen(self) -> None:
         meta = StepMeta(name="charge", args={})
         result = StepSuccess(data={}, meta=meta)
-        try:
+        with pytest.raises(AttributeError):
             result.success = False  # type: ignore[misc]
-            raise AssertionError("Should have raised")
-        except AttributeError:
-            pass
 
 
 class TestStepFailure:
@@ -101,16 +100,14 @@ class TestAggregateSuccess:
         result = AggregateSuccess(data={"charge_id": "ch_1"}, meta=meta)
         assert result.success is True
         assert result.data == {"charge_id": "ch_1"}
+        assert isinstance(result.meta, AggregateMeta)
         assert result.meta.steps_executed == ("a", "b")
 
     def test_success_is_frozen(self) -> None:
         meta = AggregateMeta(name="test", args=MappingProxyType({}))
         result = AggregateSuccess(data={}, meta=meta)
-        try:
+        with pytest.raises(AttributeError):
             result.success = False  # type: ignore[misc]
-            raise AssertionError("Should have raised")
-        except AttributeError:
-            pass
 
 
 class TestAggregateFailure:
@@ -138,8 +135,5 @@ class TestAggregateFailure:
             failed_step="x",
             rollback=RollbackReport(),
         )
-        try:
+        with pytest.raises(AttributeError):
             result.success = True  # type: ignore[misc]
-            raise AssertionError("Should have raised")
-        except AttributeError:
-            pass

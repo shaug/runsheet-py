@@ -25,8 +25,21 @@ from runsheet._errors import (
     RetryExhaustedError,
     TimeoutError,
 )
-from runsheet._internal import step_failure, step_meta, step_success, to_error
+from runsheet._internal import (
+    step_failure,
+    step_meta,
+    step_success,
+    to_ctx_dict,
+    to_error,
+)
 from runsheet._result import RollbackCallback, StepResult
+
+
+async def _call_rollback_fn(fn: RollbackFn, ctx: object, output: object) -> None:
+    """Call a rollback function (sync or async)."""
+    result = fn(ctx, output)
+    if inspect.isawaitable(result):
+        await result
 
 
 @dataclass(frozen=True)
@@ -67,7 +80,6 @@ class Step:
         self._run_fn = run_fn
         self._run_is_async = inspect.iscoroutinefunction(run_fn)
         self._rollback_fn: RollbackFn | None = None
-        self._rollback_is_async = False
 
     def __repr__(self) -> str:
         parts = [f"name={self.name!r}"]
@@ -80,13 +92,7 @@ class Step:
     async def run(self, ctx: object) -> StepResult[dict[str, Any]]:
         """Execute the step. Never raises — always returns StepResult."""
         step_input: object = ctx  # capture before isinstance narrows
-        frozen_args: dict[str, Any]
-        if isinstance(ctx, dict):
-            frozen_args = cast(dict[str, Any], ctx)
-        elif isinstance(ctx, BaseModel):
-            frozen_args = ctx.model_dump()
-        else:
-            frozen_args = {}
+        frozen_args = to_ctx_dict(ctx)
         meta = step_meta(self.name, frozen_args)
 
         # 1. Validate requires
@@ -187,9 +193,7 @@ class Step:
         """Execute the rollback function if one exists."""
         if self._rollback_fn is None:
             return
-        result = self._rollback_fn(ctx, output)
-        if self._rollback_is_async:
-            await result  # type: ignore[misc]
+        await _call_rollback_fn(self._rollback_fn, ctx, output)
 
     def make_rollback(
         self, pre_ctx: dict[str, Any], output: dict[str, Any]
@@ -202,19 +206,15 @@ class Step:
         if self._rollback_fn is None:
             return None
         fn = self._rollback_fn
-        is_async = self._rollback_is_async
 
         async def cb() -> None:
-            result = fn(pre_ctx, output)
-            if is_async:
-                await result  # type: ignore[misc]
+            await _call_rollback_fn(fn, pre_ctx, output)
 
         return cb
 
     def rollback(self, fn: RollbackFn) -> RollbackFn:
         """Decorator to attach a rollback handler to this step."""
         self._rollback_fn = fn
-        self._rollback_is_async = inspect.iscoroutinefunction(fn)
         return fn
 
     @property
@@ -245,14 +245,14 @@ class _FnStep:  # pyright: ignore[reportUnusedClass]
         *,
         name: str,
         run_fn: Callable[[object], Any],
-        rollback_fn: Callable[[object, object], Any] | None = None,
         make_rollback_fn: MakeRollbackFn | None = None,
+        requires: type[BaseModel] | None = None,
+        provides: type[BaseModel] | None = None,
     ) -> None:
         self.name = name
-        self.requires: type[BaseModel] | None = None
-        self.provides: type[BaseModel] | None = None
+        self.requires = requires
+        self.provides = provides
         self._run_fn = run_fn
-        self._rollback_fn = rollback_fn
         self._make_rollback_fn = make_rollback_fn
 
     def __repr__(self) -> str:
@@ -260,28 +260,20 @@ class _FnStep:  # pyright: ignore[reportUnusedClass]
 
     @property
     def has_rollback(self) -> bool:
-        return self._rollback_fn is not None or self._make_rollback_fn is not None
+        return self._make_rollback_fn is not None
 
     async def run(self, ctx: object) -> StepResult[dict[str, Any]]:
         return await self._run_fn(ctx)  # type: ignore[no-any-return]
 
     async def run_rollback(self, ctx: object, output: object) -> None:
-        if self._rollback_fn is not None:
-            await self._rollback_fn(ctx, output)
+        pass
 
     def make_rollback(
         self, pre_ctx: dict[str, Any], output: dict[str, Any]
     ) -> RollbackCallback | None:
         if self._make_rollback_fn is not None:
             return self._make_rollback_fn(pre_ctx, output)
-        if self._rollback_fn is None:
-            return None
-        fn = self._rollback_fn
-
-        async def cb() -> None:
-            await fn(pre_ctx, output)
-
-        return cb
+        return None
 
 
 def step(

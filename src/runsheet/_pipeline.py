@@ -8,16 +8,17 @@ nested execution with rollback propagation.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from types import MappingProxyType
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from runsheet._errors import ArgsValidationError, RollbackError, StrictOverlapError
 from runsheet._internal import (
     aggregate_meta,
-    freeze_context,
     step_failure,
     step_success,
+    to_ctx_dict,
 )
 from runsheet._middleware import StepInfo, StepMiddleware, compose_middleware
 from runsheet._result import (
@@ -48,11 +49,10 @@ class Pipeline:
         middleware: list[StepMiddleware] | None = None,
         strict: bool = False,
     ) -> None:
-        self.name = name
-        self.requires: type[BaseModel] | None = args_schema
-        self.provides: type[BaseModel] | None = None
+        self._name = name
+        self._requires: type[BaseModel] | None = args_schema
+        self._provides: type[BaseModel] | None = None
         self._steps = tuple(steps)
-        self._args_schema = args_schema
         self._middleware = tuple(middleware or [])
         self._strict = strict
 
@@ -64,7 +64,19 @@ class Pipeline:
             self._check_strict_overlaps()
 
     def __repr__(self) -> str:
-        return f"Pipeline(name={self.name!r}, steps={len(self._steps)})"
+        return f"Pipeline(name={self._name!r}, steps={len(self._steps)})"
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def requires(self) -> type[BaseModel] | None:
+        return self._requires
+
+    @property
+    def provides(self) -> type[BaseModel] | None:
+        return self._provides
 
     @property
     def has_rollback(self) -> bool:
@@ -89,7 +101,7 @@ class Pipeline:
                     seen[field_name] = step_name
 
     async def run(
-        self, args: object = None,
+        self, ctx: object = None,
     ) -> StepResult[dict[str, Any]]:
         """Execute the pipeline. Never raises — always returns StepResult."""
         self._captured_state = None
@@ -97,28 +109,23 @@ class Pipeline:
         executed: list[ExecutedStep] = []
 
         # Normalize input to dict
-        ctx: dict[str, Any]
-        if isinstance(args, BaseModel):
-            ctx = args.model_dump()
-        elif isinstance(args, dict):
-            args_dict = cast(dict[str, Any], args)
-            ctx = dict(args_dict)
-        else:
-            ctx = {}
+        ctx_dict = to_ctx_dict(ctx) if ctx is not None else {}
+        if isinstance(ctx, (dict, BaseModel)):
+            ctx_dict = dict(ctx_dict)  # ensure a fresh copy
 
-        args_snapshot: dict[str, Any] = dict(ctx)
+        args_snapshot: dict[str, Any] = dict(ctx_dict)
 
         def make_meta() -> AggregateMeta:
             return aggregate_meta(
-                self.name,
-                freeze_context(args_snapshot),
+                self._name,
+                MappingProxyType(dict(args_snapshot)),
                 tuple(steps_executed),
             )
 
         # Validate pipeline args if schema provided
-        if self._args_schema is not None:
+        if self._requires is not None:
             try:
-                self._args_schema.model_validate(ctx)
+                self._requires.model_validate(ctx_dict)
             except ValidationError as e:
                 return step_failure(
                     ArgsValidationError(f"Args validation failed: {e}"),
@@ -129,10 +136,10 @@ class Pipeline:
         # Unified execution loop — all Runnables treated uniformly
         for pipeline_step in self._steps:
             # Snapshot pre-step context
-            pre_ctx = dict(ctx)
+            pre_ctx = dict(ctx_dict)
 
             # Execute through middleware
-            result = await self._run_step_with_middleware(pipeline_step, ctx)
+            result = await self._run_step_with_middleware(pipeline_step, ctx_dict)
 
             if isinstance(result, StepFailure):
                 rollback_report = await do_rollback(executed)
@@ -150,12 +157,12 @@ class Pipeline:
                 ExecutedStep(name=pipeline_step.name, rollback=rollback_cb)
             )
             steps_executed.append(pipeline_step.name)
-            ctx = {**ctx, **output}
+            ctx_dict = {**ctx_dict, **output}
 
         # Capture state for nested rollback
         self._captured_state = executed
 
-        return step_success(dict(ctx), make_meta())
+        return step_success(dict(ctx_dict), make_meta())
 
     async def run_rollback(self, ctx: object = None, output: object = None) -> None:
         """Rollback this pipeline's executed steps.
@@ -170,7 +177,7 @@ class Pipeline:
             if report.failed:
                 causes = tuple(f.error for f in report.failed)
                 raise RollbackError(
-                    f"Pipeline '{self.name}': {len(causes)} rollback(s) failed",
+                    f"Pipeline '{self._name}': {len(causes)} rollback(s) failed",
                     causes=causes,
                 )
 
@@ -193,7 +200,7 @@ class Pipeline:
             if report.failed:
                 causes = tuple(f.error for f in report.failed)
                 raise RollbackError(
-                    f"Pipeline '{self.name}': {len(causes)} rollback(s) failed",
+                    f"Pipeline '{self._name}': {len(causes)} rollback(s) failed",
                     causes=causes,
                 )
 
