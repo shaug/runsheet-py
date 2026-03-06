@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.1...runsheet-v0.1.2) (2026-03-06)
+
+
+### Bug Fixes
+
+* **ci:** chain publish job into release workflow ([9b4f775](https://github.com/shaug/runsheet-py/commit/9b4f775be53e2b42f11e72a18c26231f42dd9c84))
+
 ## [0.1.1](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.0...runsheet-v0.1.1) (2026-03-06)
 
 
