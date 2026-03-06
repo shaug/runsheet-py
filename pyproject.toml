@@ -52,6 +52,16 @@ dev = [
     "pytest-cov>=6.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pyright>=1.1",
+    "pre-commit>=4.0",
+    "pytest-cov>=6.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/runsheet"]
 
