@@ -724,13 +724,14 @@ These are mistakes we made and corrected. Don't repeat them:
    (`TimeoutError`, `RetryExhaustedError`, etc.) with additional state
    (`timeout_ms`, `attempts`, etc.). Start with the full hierarchy.
 
-3. **Centralize error normalization.** We had `err instanceof Error ? err :
-   new Error(String(err))` repeated in 8+ places before extracting a `toError()`
-   utility. Write it once from the start.
+3. **Centralize error normalization.** We had the equivalent of
+   `err if isinstance(err, Exception) else Exception(str(err))` repeated in 8+
+   places before extracting a `to_error()` utility. Write it once from the start.
 
 4. **Shared combinator execution path.** parallel, choice, and map all need the
    same inner step lifecycle (validate requires → run → validate provides). We
-   extracted `runInnerStep()` into an `internal` module. Do this from the start.
+   extracted `run_inner_step()` into an `_internal` module. Do this from the
+   start.
 
 5. **Document WeakMap/reference invariants.** The TS version uses WeakMaps in
    choice and map to track which branch/items ran for rollback, keyed on the
