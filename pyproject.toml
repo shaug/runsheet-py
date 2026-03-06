@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "runsheet"
+version = "0.1.0"
+description = "Type-safe, composable business logic pipelines for Python"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Scott Haug", email = "scott.haug@gmail.com" }]
+keywords = [
+    "pipeline",
+    "workflow",
+    "orchestration",
+    "typed",
+    "pydantic",
+    "rollback",
+    "composition",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Framework :: Pydantic :: 2",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/shaug/runsheet-py"
+Documentation = "https://github.com/shaug/runsheet-py#readme"
+Repository = "https://github.com/shaug/runsheet-py"
+Issues = "https://github.com/shaug/runsheet-py/issues"
+Changelog = "https://github.com/shaug/runsheet-py/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pyright>=1.1",
+    "pre-commit>=4.0",
+    "pytest-cov>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/runsheet"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"llms.txt" = "runsheet/llms.txt"
+
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["runsheet"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
+reportPrivateUsage = false

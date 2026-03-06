@@ -15,6 +15,27 @@ document that sequences every cue, handoff, and fallback for a live event. That
 metaphor maps perfectly: steps are cues, context is the shared state sheet,
 rollback is the contingency plan.
 
+## Why runsheet exists
+
+Business logic has a way of growing into tangled, hard-to-test code. A checkout
+flow starts as one function, then gains validation, payment processing, inventory
+reservation, email notifications — each with its own failure modes and cleanup
+logic. Before long you're staring at a 300-line function with nested try/except
+blocks and no clear way to reuse any of it.
+
+runsheet gives that logic structure. You break work into small, focused steps with
+explicit inputs and outputs, then compose them into pipelines. Each step is
+independently testable. The pipeline handles context passing, rollback on failure,
+and schema validation at every boundary. Immutable data semantics mean steps can't
+accidentally interfere with each other.
+
+It's an organizational layer for business logic that encourages reuse, testability,
+type safety, and immutable data flow — without the overhead of a full effect system
+or workflow engine.
+
+The Python README should lead with this motivating problem. Don't start with API
+docs — start with *why this exists*.
+
 ## What runsheet is
 
 An in-memory pipeline orchestration library. You define small, focused steps with
@@ -23,14 +44,45 @@ passing, rollback on failure, and schema validation at every boundary.
 
 **It is NOT:**
 
-- A workflow engine (not Temporal, not Airflow, not Prefect). No persistence, no
-  cross-process coordination. Strictly local, single-call orchestration.
-- An actor system. No message passing, no mailboxes.
+- A workflow engine (not [Temporal], not [Airflow], not [Prefect], not [Inngest],
+  not [AWS Step Functions]). No persistence, no cross-process coordination. Strictly
+  local, single-call orchestration.
+- An actor system. No message passing, no mailboxes, no supervision trees.
 - An effect system. Lighter than Effect-TS or dry-python/returns used alone. Just
   typed pipelines with rollback.
 
-That said, it's complementary to those systems — you could use a runsheet
-pipeline as a step within a Temporal workflow.
+That said, it's **complementary** to those systems — you could use a runsheet
+pipeline as a step within a Temporal workflow or an Inngest function.
+
+[Temporal]: https://temporal.io/
+[Airflow]: https://airflow.apache.org/
+[Prefect]: https://www.prefect.io/
+[Inngest]: https://www.inngest.com/
+[AWS Step Functions]: https://aws.amazon.com/step-functions/
+
+## Origins and inspirations
+
+runsheet draws from two projects:
+
+- **[sunny/actor]** (Ruby) — the service-object pattern with declared inputs/outputs,
+  sequential composition via `play`, rollback on failure, and conditional execution.
+  This is the primary design influence for the step model, I/O contracts, and
+  rollback semantics.
+- **[@fieldguide/pipeline]** (TypeScript) — the three-parameter Arguments → Context →
+  Results execution model, the builder pattern for pipeline construction, named
+  stages with rollback, and Express-style middleware. This shaped the context
+  accumulation model and middleware design.
+
+runsheet takes the best ideas from both: sunny/actor's explicit I/O declarations and
+composition ergonomics, combined with fieldguide/pipeline's typed context flow and
+middleware system — then rebuilds them on an immutable foundation.
+
+The Python version should credit these inspirations in its docs. The Ruby lineage is
+especially relevant — Python developers will relate to sunny/actor's service-object
+pattern more directly than TypeScript developers did.
+
+[sunny/actor]: https://github.com/sunny/actor
+[@fieldguide/pipeline]: https://github.com/fieldguide/pipeline
 
 ## Core dependencies
 
@@ -679,6 +731,27 @@ match result:
 
 Or with structural pattern matching (Python 3.10+), which is even more Pythonic.
 
+## Comparison to prior art (for Python docs)
+
+The TS project's OVERVIEW.md has a comparison table. The Python version should
+include an equivalent in its own docs, updated for the Python ecosystem:
+
+| Feature | sunny/actor (Ruby) | runsheet (Python) | Prefect/Airflow |
+|---|---|---|---|
+| Declared I/O | `input`/`output` macros | Pydantic `requires`/`provides` | Task decorators |
+| Sequential composition | `play A, B, C` | `Pipeline(steps=[...])` | DAG dependencies |
+| Shared context | Mutable result object | Immutable accumulation | XComs / task results |
+| Rollback | `def rollback` | Snapshot-verified rollback | Not built-in |
+| Middleware | Not built-in | Built-in | Hooks/callbacks |
+| Conditional steps | `if:`/`unless:` lambdas | `when(predicate, step)` | `@task.branch` |
+| Branching | Not supported | `choice([pred, step], ...)` | Branch operator |
+| Collection mapping | Not supported | `map_step(key, collection, fn)` | Dynamic task mapping |
+| Scope | In-memory, single call | In-memory, single call | Distributed, persistent |
+
+This table helps users understand where runsheet fits. The key differentiator from
+Prefect/Airflow: runsheet is in-memory, single-call, no persistence. It's
+complementary, not competitive.
+
 ## Architecture decisions that transfer directly
 
 These decisions were hard-won in the TS version. Don't re-litigate them:
@@ -786,49 +859,74 @@ runsheet-py/
 Use the `src` layout. Prefix internal modules with `_` (Python convention for
 "private, don't import directly"). Export everything public from `__init__.py`.
 
+### Complete public API (`__init__.py` exports)
+
+Everything users import comes from `runsheet`. Internal modules are never imported
+directly. Here's the definitive list, mapped from the TS `index.ts`:
+
+**Functions / decorators:**
+- `step` — decorator (replaces `defineStep`)
+- `Pipeline` — constructor (replaces `buildPipeline`)
+- `when` — conditional step wrapper
+- `parallel` — concurrent step composition
+- `choice` — branching
+- `map_step` — collection iteration (name TBD, see open questions)
+- `filter_step` — collection filtering (name TBD)
+- `flat_map` — collection expansion
+
+**Error classes:**
+- `RunsheetError` — base class
+- `RequiresValidationError`
+- `ProvidesValidationError`
+- `ArgsValidationError`
+- `PredicateError`
+- `TimeoutError`
+- `RetryExhaustedError`
+- `StrictOverlapError`
+- `ChoiceNoMatchError`
+- `RollbackError`
+- `UnknownError`
+- `RunsheetErrorCode` — StrEnum
+
+**Result types:**
+- `PipelineResult` — union type
+- `PipelineSuccess`
+- `PipelineFailure`
+- `PipelineExecutionMeta`
+- `RollbackReport`
+- `RollbackFailure`
+
+**Step types:**
+- `Step` — base protocol/type
+- `RetryPolicy` — dataclass
+- `StepMiddleware` — callable protocol
+
+**Key principle:** Users should never need to import from internal modules or from
+Pydantic/returns directly for runsheet-specific types. If the Python version uses
+`dry-python/returns`, re-export `Result`, `Success`, `Failure` from `runsheet` so
+users have a single import source. The TS version does exactly this with
+`composable-functions`.
+
 ## Tooling
 
 - **Python 3.11+** — required for `asyncio.TaskGroup`, `asyncio.timeout`,
   `StrEnum`, `ExceptionGroup`
 - **uv** — package manager (fast, modern, replaces pip/poetry/pdm)
 - **ruff** — linting and formatting (replaces flake8, black, isort)
-- **mypy** or **pyright** — type checking (pick one, pyright is faster)
-- **pytest** + **pytest-asyncio** — testing
+- **pyright** — type checker (faster and stricter than mypy — don't offer both)
+- **pytest** + **pytest-asyncio** + **pytest-cov** — testing and coverage
 - **pydantic v2** — schema validation
+- **hatchling** — build backend
+- **pre-commit** — git hooks
+
+See the "Packaging and distribution" section below for the complete tooling stack
+table with rationale.
 
 ### pyproject.toml skeleton
 
-```toml
-[project]
-name = "runsheet"
-version = "0.1.0"
-description = "Type-safe, composable business logic pipelines for Python"
-requires-python = ">=3.11"
-dependencies = [
-    "pydantic>=2.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.8",
-    "pyright>=1.1",
-]
-
-[tool.ruff]
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-
-[tool.pyright]
-pythonVersion = "3.11"
-typeCheckingMode = "strict"
-```
+See the complete pyproject.toml in the "Packaging and distribution" section below.
+It includes build-system, classifiers, license, URLs, hatch config, and all tool
+configuration. Use that version — it's production-ready.
 
 ## Target API — complete example
 
@@ -957,6 +1055,410 @@ Suggested implementation order (each builds on the previous):
 
 Write tests alongside each step. The TS test files are a direct guide for what
 to test — the scenarios translate 1:1.
+
+## Packaging and distribution
+
+The TS project has mature packaging infrastructure. Here's the complete mapping to
+Python equivalents. Get this right from day one — retrofitting packaging is painful.
+
+### Tooling stack (best-of-breed, 2026)
+
+| Concern | Tool | Why |
+|---|---|---|
+| Package manager | **uv** | Fastest Python package manager. Manages deps, lockfiles, Python versions, virtualenvs. Replaces pip, pip-tools, pyenv, virtualenv. |
+| Type checker | **pyright** | Faster and stricter than mypy. Better inference, better error messages. Don't offer both — pick one. |
+| Lint + format | **ruff** | Single Rust binary replaces black, isort, flake8, pyupgrade, and dozens of plugins. Sub-second on large codebases. |
+| Testing | **pytest** + **pytest-asyncio** | pytest is the only serious choice. `asyncio_mode = "auto"` avoids `@pytest.mark.asyncio` on every test. |
+| Coverage | **pytest-cov** | Wraps coverage.py. Enforce `fail_under = 90` in CI. For a library with rollback/combinator branches, coverage catches dead code. |
+| Build backend | **hatchling** | Zero-config for src layout. Lightweight, maintained by PyPA. |
+| Hooks | **pre-commit** | Standard Python hook manager. Replaces husky + lint-staged. |
+| Multi-version testing | **uv** (CI matrix) | `uv run --python 3.12 pytest` auto-fetches interpreters. Let CI be the matrix authority (3.11/3.12/3.13). Skip nox/tox unless pain emerges. |
+
+Intentionally absent:
+- **mypy** — pyright is strictly better for this use case
+- **black** — ruff format replaced it
+- **tox/nox** — uv handles multi-version; CI is the real matrix
+- **setuptools** — hatchling is lighter and modern
+- **sphinx/mkdocs** — README + llms.txt until API surface warrants dedicated docs
+
+### Complete pyproject.toml
+
+The skeleton above is missing critical sections. Here's the full version:
+
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "runsheet"
+version = "0.1.0"
+description = "Type-safe, composable business logic pipelines for Python"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+keywords = [
+    "pipeline",
+    "workflow",
+    "orchestration",
+    "typed",
+    "pydantic",
+    "rollback",
+    "composition",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Framework :: Pydantic :: 2",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/shaug/runsheet-py"
+Documentation = "https://github.com/shaug/runsheet-py#readme"
+Repository = "https://github.com/shaug/runsheet-py"
+Issues = "https://github.com/shaug/runsheet-py/issues"
+Changelog = "https://github.com/shaug/runsheet-py/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pyright>=1.1",
+    "pre-commit>=4.0",
+    "pytest-cov>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/runsheet"]
+
+[tool.ruff]
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["runsheet"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
+```
+
+### Build backend: Hatchling
+
+The TS project uses `tsup` (esbuild) to produce CJS + ESM bundles. Python doesn't
+need a compile step, but it does need a build backend to create sdists and wheels.
+**Hatchling** is the recommended choice:
+
+- Zero config for src layout projects
+- Fast, lightweight, maintained by the PyPA
+- No setup.py or setup.cfg needed
+- Alternatives: `setuptools` (heavier), `flit` (simpler but less flexible),
+  `pdm-backend`
+
+### PEP 561: py.typed marker
+
+For type checkers (pyright, mypy) to recognize your package as typed, include an
+empty marker file:
+
+```
+src/runsheet/py.typed    # empty file, must be present
+```
+
+This is the Python equivalent of the TS project's `"types"` field in package.json.
+Without it, downstream users get no type checking for your library.
+
+### What goes in the wheel
+
+The TS project's package.json has:
+```json
+"files": ["dist", "llms.txt"]
+```
+
+Python equivalent via hatch config above (`packages = ["src/runsheet"]`). The wheel
+will contain:
+- `runsheet/` package directory (all `.py` files)
+- `runsheet/py.typed` marker
+- Package metadata
+
+For the sdist (source distribution), hatch includes everything tracked by git by
+default. To explicitly include `llms.txt` in the wheel, add:
+
+```toml
+[tool.hatch.build.targets.wheel.force-include]
+"llms.txt" = "runsheet/llms.txt"
+```
+
+### License file
+
+Create a `LICENSE` file at the project root with the MIT license text. The
+`license = "MIT"` field in pyproject.toml references the SPDX identifier; the
+actual license text goes in the file.
+
+### CI/CD: GitHub Actions
+
+The TS project has two workflows:
+
+**1. CI (`ci.yml`)** — runs on every push/PR, matrix tests across Node 20/22/24/25.
+
+Python equivalent:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest --cov --cov-report=term-missing
+
+  # Optional: test on multiple OS
+  # os: [ubuntu-latest, macos-latest, windows-latest]
+```
+
+**2. Release (`release.yml`)** — release-please + publish in a single workflow.
+
+The TS version has both jobs in one file: release-please creates the GitHub release,
+then publish runs only when a release was created. The publish job **re-runs lint,
+typecheck, and tests** before building and publishing — this is a safety gate.
+
+Python equivalent using trusted publishers (PyPI's recommended auth method — no
+API tokens needed):
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write  # Required for trusted publishing
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          release-type: python
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest --cov --cov-report=term-missing
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # No credentials needed — uses OIDC trusted publishing
+```
+
+To set up trusted publishers, configure the PyPI project to trust the GitHub
+repository + workflow + environment. This is done once in the PyPI project settings
+and is more secure than API tokens.
+
+### Pre-commit hooks
+
+The TS project uses husky + lint-staged + commitlint. Python equivalent:
+
+**pre-commit** (the standard Python hook manager):
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff        # lint
+        args: [--fix]
+      - id: ruff-format # format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  # Optional: markdown linting (equivalent to markdownlint-cli2)
+  - repo: https://github.com/markdownlint/markdownlint
+    rev: v0.16.0
+    hooks:
+      - id: markdownlint
+
+  # Optional: commit message linting (equivalent to commitlint)
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.1.0
+    hooks:
+      - id: commitizen
+```
+
+Install with: `pre-commit install`
+
+**Note:** The TS project's husky pre-commit hook runs lint-staged, typecheck, AND
+the full test suite on every commit. This is aggressive but ensures nothing broken
+gets committed. In Python, add a local hook to `.pre-commit-config.yaml` for the
+same effect:
+
+```yaml
+  - repo: local
+    hooks:
+      - id: typecheck
+        name: pyright
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
+      - id: tests
+        name: pytest
+        entry: uv run pytest -x -q
+        language: system
+        pass_filenames: false
+```
+
+The TS project's `scripts/lint.sh` consolidates linting into one command. In Python,
+ruff handles both linting and formatting, so the equivalent is just:
+
+```bash
+ruff check . && ruff format --check .
+```
+
+### Changelog
+
+The TS project uses release-please to auto-generate `CHANGELOG.md` from
+conventional commits. This works identically for Python projects — release-please
+is language-agnostic. Use conventional commit messages (`feat:`, `fix:`, `chore:`,
+etc.) and release-please generates the changelog automatically.
+
+### README structure
+
+Mirror the TS project's README structure:
+1. One-line description + badges (PyPI version, Python versions, CI status, license)
+2. Install command (`pip install runsheet` / `uv add runsheet`)
+3. Quick example (30 lines max)
+4. Core concepts (brief)
+5. API reference (each function/decorator with examples)
+6. Link to llms.txt for AI consumption
+
+### llms.txt
+
+The TS project maintains `llms.txt` — a plain-text file designed for LLM
+consumption that summarizes the entire API surface. Create an equivalent for the
+Python version. This file should:
+
+- Be included in the published package (see wheel force-include above)
+- Cover every public function, class, and type
+- Include concise usage examples
+- Be maintained alongside the code (update when the API changes)
+- Be referenced from the README
+
+### Package manager: uv
+
+Use **uv** as the package manager (Python's equivalent of pnpm):
+
+- `uv init` to bootstrap
+- `uv add pydantic` for dependencies
+- `uv add --dev pytest ruff pyright` for dev dependencies
+- `uv sync` to install from lockfile
+- `uv run pytest` to run in the virtualenv
+- `uv build` to create sdist + wheel
+- `uv publish` to upload to PyPI
+
+uv generates a `uv.lock` lockfile (equivalent to `pnpm-lock.yaml`). Commit it —
+it ensures reproducible installs in CI.
+
+### Version management
+
+Two options:
+
+1. **Static version in pyproject.toml** — simplest. Release-please bumps it
+   automatically via PR. This is what the TS project does with package.json.
+
+2. **Dynamic version from git tags** — using `hatch-vcs` plugin. More complex,
+   avoid unless you have a specific reason.
+
+Recommend option 1 for simplicity.
+
+### Files checklist
+
+Before first publish, ensure these exist:
+
+```
+pyproject.toml          # complete (see above)
+LICENSE                 # MIT license text
+README.md               # with badges, install, quick example
+CHANGELOG.md            # can start empty, release-please fills it
+llms.txt                # LLM-friendly API reference
+src/runsheet/__init__.py  # public API re-exports
+src/runsheet/py.typed     # empty PEP 561 marker
+.pre-commit-config.yaml   # hooks config
+.github/workflows/ci.yml  # CI pipeline
+.github/workflows/release.yml  # publish to PyPI
+uv.lock                  # committed lockfile
+```
 
 ## Open questions for the implementer
 
