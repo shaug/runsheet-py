@@ -70,6 +70,7 @@ from runsheet import Pipeline
 pipeline = Pipeline(
     name="checkout",
     steps=[step_a, step_b, step_c],
+    output=CheckoutOutput,      # optional, validates & types result.data
     args_schema=OrderInput,     # optional, validates pipeline args
     middleware=[timing_mw],     # optional, wraps step lifecycle
     strict=True,                # optional, detect provides key collisions
@@ -87,6 +88,18 @@ checkout = Pipeline(name="checkout", steps=[validate, charge, confirm])
 full_flow = Pipeline(name="full_flow", steps=[checkout, ship, notify])
 ```
 
+Parameters:
+- name: str — pipeline name
+- steps: Sequence[Runnable] — steps to execute in order
+- output: type[BaseModel] | None — optional, validates accumulated context and types result.data
+- args_schema: type[BaseModel] | None — optional, validates pipeline args
+- middleware: list[StepMiddleware] | None — optional, wraps step lifecycle
+- strict: bool — optional, detect provides key collisions at build time
+
+When output= is provided, result.data is a typed Pydantic model instance with attribute access.
+Without output=, result.data is dict[str, Any]. If output validation fails, the pipeline returns
+AggregateFailure with ProvidesValidationError (failed_step="<output>").
+
 ### Step result
 
 ```python
@@ -94,7 +107,7 @@ result = await pipeline.run(args)
 
 if result.success:
     # AggregateSuccess
-    result.data          # dict[str, Any] — accumulated context
+    result.data          # dict[str, Any], or typed model if output= was set
     result.meta.name     # str — pipeline name
     result.meta.args     # Mapping[str, Any] — original args
     result.meta.steps_executed  # tuple[str, ...]

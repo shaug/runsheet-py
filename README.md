@@ -21,6 +21,11 @@ class ValidatedOrder(BaseModel):
 class ChargeOutput(BaseModel):
     charge_id: str
 
+class CheckoutOutput(BaseModel):
+    validated: bool
+    charge_id: str
+    email_sent: bool
+
 @step(requires=OrderInput, provides=ValidatedOrder)
 async def validate_order(ctx: OrderInput) -> ValidatedOrder:
     if ctx.amount <= 0:
@@ -39,10 +44,11 @@ async def undo_charge(ctx: OrderInput, output: ChargeOutput) -> None:
 checkout = Pipeline(
     name="checkout",
     steps=[validate_order, charge_payment, send_confirmation],
+    output=CheckoutOutput,
 )
 
 result = await checkout.run(OrderInput(order_id="123", amount=50.0))
-# result.data["charge_id"] — accumulated context, validated at every boundary
+# result.data.charge_id — fully typed, validated at pipeline end
 ```
 
 ## Why runsheet
@@ -76,7 +82,7 @@ The name takes its inspiration from the world of stage productions and live broa
 
 ### Typed accumulated context
 
-Args persist and outputs accumulate. Initial arguments flow through the entire pipeline, each step's output merges into the context, and every step sees the full picture of everything before it.
+Args persist and outputs accumulate. Initial arguments flow through the entire pipeline, each step's output merges into the context, and every step sees the full picture of everything before it. Pass `output=` to a pipeline to get a validated Pydantic model as `result.data` with full attribute access and IDE autocomplete, instead of a plain dict.
 
 ### Immutable step boundaries
 
@@ -166,23 +172,31 @@ async def undo_charge(ctx: OrderInput, output: ChargeOutput) -> None:
 import asyncio
 from runsheet import Pipeline, AggregateSuccess, AggregateFailure
 
+
+class CheckoutOutput(BaseModel):
+    validated: bool
+    charge_id: str
+    email_sent: bool
+
+
 checkout = Pipeline(
     name="checkout",
     steps=[validate_order, charge_payment, send_confirmation],
     args_schema=OrderInput,
+    output=CheckoutOutput,
 )
 
 result = await checkout.run(OrderInput(order_id="123", amount=50.0))
 
 if result.success:
-    print(result.data["charge_id"])   # accumulated context
-    print(result.data["email_sent"])
+    print(result.data.charge_id)   # str — typed attribute access
+    print(result.data.email_sent)  # bool
 else:
     print(result.error)               # what went wrong
     print(result.rollback)            # RollbackReport(completed=..., failed=...)
 ```
 
-`pipeline.run()` never raises. It always returns a result — either `AggregateSuccess` or `AggregateFailure`.
+`pipeline.run()` never raises. It always returns a result — either `AggregateSuccess` or `AggregateFailure`. When `output=` is provided, `result.data` is a validated Pydantic model instance. Without it, `result.data` is a `dict[str, Any]`.
 
 ### A second example: workspace onboarding
 
@@ -513,7 +527,7 @@ Every `run()` returns a result with execution metadata:
 ```python
 # Success (AggregateSuccess)
 result.success          # True
-result.data             # dict — accumulated context
+result.data             # dict (or typed model if output= was set)
 result.meta.name        # "checkout"
 result.meta.args        # Mapping — original args snapshot
 result.meta.steps_executed  # ("validate_order", "charge_payment", "send_confirmation")
@@ -602,17 +616,18 @@ Decorator to create a pipeline step. Returns a `Step` object with a `.rollback` 
 | `retry`    | `RetryPolicy`         | Optional retry policy for transient failures      |
 | `timeout`  | `float`               | Optional max duration in seconds                  |
 
-### `Pipeline(name, steps, args_schema, middleware, strict)`
+### `Pipeline(name, steps, output, args_schema, middleware, strict)`
 
 Construct a pipeline from a list of steps.
 
-| Option        | Type                  | Description                                                       |
-| ------------- | --------------------- | ----------------------------------------------------------------- |
-| `name`        | `str`                 | Pipeline name                                                     |
-| `steps`       | `Sequence[Runnable]`  | Steps to execute in order                                         |
-| `args_schema` | `type[BaseModel]`     | Optional Pydantic model for pipeline input validation             |
-| `middleware`  | `list[StepMiddleware]` | Optional middleware                                              |
-| `strict`      | `bool`                | Optional — raises at build time if two steps provide the same key |
+| Option        | Type                   | Description                                                                  |
+| ------------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `name`        | `str`                  | Pipeline name                                                                |
+| `steps`       | `Sequence[Runnable]`   | Steps to execute in order                                                    |
+| `output`      | `type[BaseModel]`      | Optional Pydantic model — validates accumulated context and types `result.data` |
+| `args_schema` | `type[BaseModel]`      | Optional Pydantic model for pipeline input validation                        |
+| `middleware`  | `list[StepMiddleware]` | Optional middleware                                                          |
+| `strict`      | `bool`                 | Optional — raises at build time if two steps provide the same key            |
 
 ### `when(predicate, step)`
 
