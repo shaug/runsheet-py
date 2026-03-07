@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.2...runsheet-v0.1.3) (2026-03-07)
+
+
+### Features
+
+* add distribute() cross-product collection combinator ([253f3fe](https://github.com/shaug/runsheet-py/commit/253f3fe6ec3161653a1baff27576570243050acc))
+
+
+### Bug Fixes
+
+* address code review findings — rollback correctness, type safety, and API hardening ([b1e2d24](https://github.com/shaug/runsheet-py/commit/b1e2d24ff061dc8a3460a3213d09730fdaec2510))
+* align retry backoff, RetryExhaustedError cause chain, when() naming, and choice() no-match with JS ([ba936df](https://github.com/shaug/runsheet-py/commit/ba936dfd0c16aaab2bccbee1be4cd8e2aa109c43))
+
+
+### Documentation
+
+* update README and llms.txt with improved structure and accuracy ([e7bc2a5](https://github.com/shaug/runsheet-py/commit/e7bc2a57d31a74b95ca7734aa32538e1876cddd1))
+
 ## [0.1.2](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.1...runsheet-v0.1.2) (2026-03-06)
 
 
