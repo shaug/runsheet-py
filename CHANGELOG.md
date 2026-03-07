@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.4...runsheet-v0.1.5) (2026-03-07)
+
+
+### Documentation
+
+* document typed pipeline output via `output=` parameter ([4511345](https://github.com/shaug/runsheet-py/commit/45113450b113bd4533b61f3b1de8213cb2261335))
+
 ## [0.1.4](https://github.com/shaug/runsheet-py/compare/runsheet-v0.1.3...runsheet-v0.1.4) (2026-03-07)
 
 
