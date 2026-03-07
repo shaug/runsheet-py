@@ -73,6 +73,23 @@ class TestErrorSubclasses:
         assert err.attempts == 3
         assert err.last_error is cause
 
+    def test_retry_exhausted_errors_single_cause(self) -> None:
+        cause = ValueError("fail")
+        err = RetryExhaustedError(
+            "retries done", attempts=1, last_error=cause, errors=(cause,)
+        )
+        assert err.errors == (cause,)
+        assert err.__cause__ is cause
+
+    def test_retry_exhausted_errors_multiple_causes(self) -> None:
+        c1 = ValueError("first")
+        c2 = RuntimeError("second")
+        err = RetryExhaustedError(
+            "retries done", attempts=2, last_error=c2, errors=(c1, c2)
+        )
+        assert err.errors == (c1, c2)
+        assert isinstance(err.__cause__, ExceptionGroup)
+
     def test_strict_overlap(self) -> None:
         err = StrictOverlapError("overlap", key="status", steps=("step_a", "step_b"))
         assert err.code == RunsheetErrorCode.STRICT_OVERLAP

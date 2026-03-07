@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from runsheet import (
     AggregateFailure,
     AggregateSuccess,
-    ChoiceNoMatchError,
     Pipeline,
     PredicateError,
     choice,
@@ -104,7 +103,9 @@ class TestChoice:
         assert isinstance(result, AggregateSuccess)
         assert result.data["method"] == "default"
 
-    async def test_no_match_error(self) -> None:
+    async def test_no_match_returns_empty_success(self) -> None:
+        """No matching branch returns empty success (like a skipped when())."""
+
         @step(provides=CardOutput)
         async def charge_card(ctx: dict) -> CardOutput:  # type: ignore[type-arg]
             return CardOutput(charge_id="card_1", method="card")
@@ -119,8 +120,7 @@ class TestChoice:
         )
 
         result = await pipeline.run({"method": "crypto"})
-        assert isinstance(result, AggregateFailure)
-        assert isinstance(result.error, ChoiceNoMatchError)
+        assert isinstance(result, AggregateSuccess)
 
     async def test_only_matched_branch_in_rollback(self) -> None:
         """Only the matched branch participates in rollback."""

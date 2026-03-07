@@ -13,7 +13,7 @@ import contextlib
 from collections.abc import Callable
 from typing import Any, cast
 
-from runsheet._errors import ChoiceNoMatchError, PredicateError, RollbackError
+from runsheet._errors import PredicateError, RollbackError
 from runsheet._internal import (
     aggregate_meta,
     call_predicate,
@@ -38,7 +38,7 @@ def when(
     inner_step: Runnable,
 ) -> _FnStep:
     """Conditional step — only runs when predicate returns True."""
-    step_name = f"when({inner_step.name})"
+    step_name = inner_step.name
 
     # Per-call-site state: whether the inner step ran.
     # make_rb atomically consumes this — safe because Pipeline calls
@@ -205,7 +205,7 @@ def choice(
     """Branching: predicates evaluated in order, first match wins.
 
     Returns a StepResult with AggregateMeta tracking which branch ran.
-    Bare step as last arg = default. No match = ChoiceNoMatchError.
+    Bare step as last arg = default. No match = empty success (no-op).
     Only the matched branch participates in rollback.
     """
     step_name = "choice"
@@ -252,11 +252,7 @@ def choice(
                 return step_success(result.data, meta)
 
         meta = aggregate_meta(step_name, ctx_dict, ())
-        return step_failure(
-            ChoiceNoMatchError("No branch matched in choice step"),
-            meta,
-            step_name,
-        )
+        return step_success({}, meta)
 
     def make_rb(
         pre_ctx: dict[str, Any], output: dict[str, Any]

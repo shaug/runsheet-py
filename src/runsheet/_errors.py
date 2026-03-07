@@ -66,11 +66,24 @@ class TimeoutError(RunsheetError):
 class RetryExhaustedError(RunsheetError):
     attempts: int
     last_error: Exception
+    errors: tuple[Exception, ...]
 
-    def __init__(self, message: str, *, attempts: int, last_error: Exception) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        last_error: Exception,
+        errors: tuple[Exception, ...] = (),
+    ) -> None:
         self.attempts = attempts
         self.last_error = last_error
+        self.errors = errors
         super().__init__(RunsheetErrorCode.RETRY_EXHAUSTED, message)
+        if len(errors) == 1:
+            self.__cause__ = errors[0]
+        elif len(errors) > 1:
+            self.__cause__ = ExceptionGroup(message, list(errors))
 
 
 class StrictOverlapError(RunsheetError):

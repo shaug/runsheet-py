@@ -176,9 +176,9 @@ class Step:
                         break
                     if self.retry.delay > 0:
                         if self.retry.backoff == "exponential":
-                            delay = self.retry.delay * (2**attempt)
+                            delay = self.retry.delay * (2 ** (attempt))
                         else:
-                            delay = self.retry.delay
+                            delay = self.retry.delay * (attempt + 1)
                         await asyncio.sleep(delay)
 
         last_error = errors[-1] if errors else Exception("Unknown retry failure")
@@ -186,6 +186,7 @@ class Step:
             f"Step '{self.name}' failed after {len(errors)} attempt(s)",
             attempts=len(errors),
             last_error=last_error,
+            errors=tuple(errors),
         )
 
     async def run_rollback(self, ctx: object, output: object) -> None:
