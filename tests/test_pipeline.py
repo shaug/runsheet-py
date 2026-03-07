@@ -16,6 +16,7 @@ from runsheet import (
     RequiresValidationError,
     RetryExhaustedError,
     RetryPolicy,
+    StepSuccess,
     StrictOverlapError,
     TimeoutError,
     step,
@@ -468,3 +469,75 @@ class TestPipelineComposition:
         )
         result = await outer.run({})
         assert isinstance(result, AggregateFailure)
+
+
+class TestTypedOutput:
+    async def test_output_returns_model_instance(self) -> None:
+        """Pipeline with output= returns a typed model, not a dict."""
+
+        class CheckoutOutput(BaseModel):
+            validated: bool
+            charge_id: str
+            email_sent: bool
+
+        pipeline = Pipeline(
+            name="checkout",
+            steps=[validate_order, charge_payment, send_email],
+            args_schema=OrderInput,
+            output=CheckoutOutput,
+        )
+        result = await pipeline.run(OrderInput(order_id="123", amount=50.0))
+        assert isinstance(result, StepSuccess)
+        assert isinstance(result.data, CheckoutOutput)
+        assert result.data.charge_id == "ch_123"
+        assert result.data.email_sent is True
+        assert result.data.validated is True
+
+    async def test_output_validation_failure(self) -> None:
+        """Pipeline with output= fails if accumulated context doesn't match."""
+
+        class StrictOutput(BaseModel):
+            nonexistent_field: str
+
+        pipeline = Pipeline(
+            name="test",
+            steps=[validate_order],
+            args_schema=OrderInput,
+            output=StrictOutput,
+        )
+        result = await pipeline.run(OrderInput(order_id="1", amount=10.0))
+        assert isinstance(result, AggregateFailure)
+        assert isinstance(result.error, ProvidesValidationError)
+        assert result.failed_step == "<output>"
+
+    async def test_without_output_returns_dict(self) -> None:
+        """Pipeline without output= still returns dict[str, Any]."""
+        pipeline = Pipeline(
+            name="test",
+            steps=[validate_order, charge_payment],
+            args_schema=OrderInput,
+        )
+        result = await pipeline.run(OrderInput(order_id="1", amount=10.0))
+        assert isinstance(result, AggregateSuccess)
+        assert isinstance(result.data, dict)
+        assert result.data["charge_id"] == "ch_1"
+
+    async def test_output_with_nested_pipeline(self) -> None:
+        """Outer pipeline with output= validates after inner pipeline runs."""
+
+        class FullOutput(BaseModel):
+            validated: bool
+            charge_id: str
+
+        inner = Pipeline(name="inner", steps=[validate_order, charge_payment])
+        outer = Pipeline(
+            name="outer",
+            steps=[inner],
+            args_schema=OrderInput,
+            output=FullOutput,
+        )
+        result = await outer.run(OrderInput(order_id="42", amount=100.0))
+        assert isinstance(result, StepSuccess)
+        assert isinstance(result.data, FullOutput)
+        assert result.data.charge_id == "ch_42"
+        assert result.data.validated is True

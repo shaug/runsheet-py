@@ -9,11 +9,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Generic, TypeVar, overload
 
 from pydantic import BaseModel, ValidationError
 
-from runsheet._errors import ArgsValidationError, RollbackError, StrictOverlapError
+from runsheet._errors import (
+    ArgsValidationError,
+    ProvidesValidationError,
+    RollbackError,
+    StrictOverlapError,
+)
 from runsheet._internal import (
     aggregate_meta,
     step_failure,
@@ -30,21 +35,60 @@ from runsheet._result import (
 )
 from runsheet._rollback import ExecutedStep, do_rollback
 
+T = TypeVar("T")
 
-class Pipeline:
+
+class Pipeline(Generic[T]):
     """Pipeline that sequences steps with context accumulation.
 
     Pipeline satisfies the Runnable protocol — it has name, run(),
     has_rollback, run_rollback(), and make_rollback(). When used as a
     nested step in an outer pipeline, failure of a later outer step
     triggers rollback of this pipeline's inner steps via make_rollback().
+
+    When ``output`` is provided, the final accumulated context is
+    validated against the model and ``result.data`` is a typed model
+    instance with attribute access::
+
+        pipeline = Pipeline(
+            name="checkout",
+            steps=[validate_order, charge_payment],
+            output=CheckoutOutput,
+        )
+        result = await pipeline.run(...)
+        if result.success:
+            print(result.data.charge_id)  # fully typed
     """
+
+    @overload
+    def __init__(
+        self,
+        *,
+        name: str,
+        steps: Sequence[Runnable],
+        output: type[T],
+        args_schema: type[BaseModel] | None = ...,
+        middleware: list[StepMiddleware] | None = ...,
+        strict: bool = ...,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: Pipeline[dict[str, Any]],
+        *,
+        name: str,
+        steps: Sequence[Runnable],
+        args_schema: type[BaseModel] | None = ...,
+        middleware: list[StepMiddleware] | None = ...,
+        strict: bool = ...,
+    ) -> None: ...
 
     def __init__(
         self,
         *,
         name: str,
         steps: Sequence[Runnable],
+        output: type[Any] | None = None,
         args_schema: type[BaseModel] | None = None,
         middleware: list[StepMiddleware] | None = None,
         strict: bool = False,
@@ -52,6 +96,7 @@ class Pipeline:
         self._name = name
         self._requires: type[BaseModel] | None = args_schema
         self._provides: type[BaseModel] | None = None
+        self._output: type[Any] | None = output
         self._steps = tuple(steps)
         self._middleware = tuple(middleware or [])
         self._strict = strict
@@ -103,7 +148,7 @@ class Pipeline:
     async def run(
         self,
         ctx: object = None,
-    ) -> StepResult[dict[str, Any]]:
+    ) -> StepResult[T]:
         """Execute the pipeline. Never raises — always returns StepResult."""
         self._captured_state = None
         steps_executed: list[str] = []
@@ -159,7 +204,21 @@ class Pipeline:
         # Capture state for nested rollback
         self._captured_state = executed
 
-        return step_success(dict(ctx_dict), make_meta())
+        # Validate and return typed output if output schema provided
+        if self._output is not None and issubclass(self._output, BaseModel):
+            try:
+                typed_output = self._output.model_validate(ctx_dict)
+            except ValidationError as e:
+                return step_failure(
+                    ProvidesValidationError(
+                        f"Pipeline '{self._name}' output validation failed: {e}"
+                    ),
+                    make_meta(),
+                    "<output>",
+                )
+            return step_success(typed_output, make_meta())  # type: ignore[arg-type]
+
+        return step_success(dict(ctx_dict), make_meta())  # type: ignore[return-value]
 
     async def run_rollback(self, ctx: object = None, output: object = None) -> None:
         """Rollback this pipeline's executed steps.
